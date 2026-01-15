@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - Gemini Film Room</title>
+    <style>
+        body {
+            background-color: #000;
+            color: #e0e0e0;
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: #121212;
+            padding: 40px;
+            border-radius: 10px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid #333;
+        }
+        h2 { color: #00ff88; text-align: center; }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            background: #222;
+            border: 1px solid #444;
+            color: white;
+            box-sizing: border-box; 
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #00ff88;
+            color: black;
+            border: none;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover { background: #00cc6a; }
+        
+        #dashboard { display: none; }
+        .user-list {
+            list-style: none;
+            padding: 0;
+            margin-top: 20px;
+        }
+        .user-item {
+            background: #1e1e1e;
+            padding: 10px;
+            margin-bottom: 5px;
+            border-left: 3px solid #00ff88;
+        }
+        .error { color: #ff4444; text-align: center; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="login-view" class="container">
+        <h2>🔒 Admin Login</h2>
+        <input type="email" id="admin-email" placeholder="Admin Email">
+        <input type="password" id="admin-pass" placeholder="Password">
+        <button onclick="login()">Access Dashboard</button>
+        <div id="error-msg" class="error"></div>
+    </div>
+
+    <div id="dashboard" class="container">
+        <h2>👥 Registered Users</h2>
+        <ul id="user-list" class="user-list">
+            </ul>
+        <button onclick="logout()" style="background: #444; color: white;">Logout</button>
+    </div>
+
+    <script>
+        async function login() {
+            const email = document.getElementById('admin-email').value;
+            const password = document.getElementById('admin-pass').value;
+            const errorMsg = document.getElementById('error-msg');
+
+            try {
+                const response = await fetch('http://localhost:3000/api/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // Hide login, show dashboard
+                    document.getElementById('login-view').style.display = 'none';
+                    document.getElementById('dashboard').style.display = 'block';
+                    
+                    // Render the list
+                    const list = document.getElementById('user-list');
+                    list.innerHTML = ''; 
+                    data.users.forEach(userEmail => {
+                        const li = document.createElement('li');
+                        li.className = 'user-item';
+                        li.textContent = userEmail;
+                        list.appendChild(li);
+                    });
+                } else {
+                    errorMsg.textContent = "❌ Access Denied";
+                }
+            } catch (err) {
+                errorMsg.textContent = "Server Error";
+            }
+        }
+
+        function logout() {
+            location.reload();
+        }
+    </script>
+</body>
+</html>
