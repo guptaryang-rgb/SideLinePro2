@@ -35,6 +35,9 @@ const els = {
   countOvertakenPill: document.getElementById('count-overtaken-pill'),
   toastContainer: document.getElementById('event-toast-container'),
   modelLoadingBadge: document.getElementById('model-loading-badge'),
+  gpsStatusBadge: document.getElementById('gps-status-badge'),
+  gpsStatusText: document.getElementById('gps-status-text'),
+  lensSwitcher: document.getElementById('lens-switcher'),
   driveError: document.getElementById('drive-error'),
   driveErrorMessage: document.getElementById('drive-error-message'),
   driveErrorBackBtn: document.getElementById('drive-error-back-btn'),
@@ -69,6 +72,17 @@ const state = {
   liveTopSpeedKmh: 0,
   lastSummary: null,
   timerIntervalId: null,
+  resizeObserver: null,
+  gpsFixAcquired: false,
+  activeLensDeviceId: null,
+};
+
+const GPS_ERROR_MESSAGES = {
+  permission_denied: 'Location permission denied — enable it in Settings to track speed & distance.',
+  position_unavailable: 'GPS signal unavailable — move somewhere with a clearer sky view.',
+  timeout: 'Still waiting for a GPS fix…',
+  unsupported: "This browser doesn't support location tracking.",
+  unknown: 'Waiting for GPS…',
 };
 
 // ---------------------------------------------------------------------------
@@ -276,6 +290,13 @@ async function startDrive() {
 
   resizeCanvasToVideo();
   window.addEventListener('resize', resizeCanvasToVideo);
+  state.resizeObserver = new ResizeObserver(() => resizeCanvasToVideo());
+  state.resizeObserver.observe(els.viewDrive);
+
+  setupLensSwitcher(stream).catch(() => {
+    // No lens data (e.g. Android usually exposes only one back camera) — leave the
+    // switcher hidden, not an error worth surfacing.
+  });
 
   // Vision model loads in the background — the drive/GPS side starts immediately.
   els.modelLoadingBadge.classList.remove('hidden');
@@ -291,10 +312,23 @@ async function startDrive() {
       els.modelLoadingBadge.classList.add('hidden');
     });
 
+  state.gpsFixAcquired = false;
+  els.gpsStatusText.textContent = GPS_ERROR_MESSAGES.unknown;
+  els.gpsStatusBadge.classList.remove('hidden');
+
   state.tripTracker = new TripTracker();
   state.tripTracker.onUpdate((liveStats) => {
+    if (!state.gpsFixAcquired) {
+      state.gpsFixAcquired = true;
+      els.gpsStatusBadge.classList.add('hidden');
+    }
     els.liveSpeed.textContent = String(Math.round(liveStats.speedKmh || 0));
     state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
+  });
+  state.tripTracker.onError((reason) => {
+    if (state.gpsFixAcquired) return; // already getting fixes — a stray error isn't worth interrupting the UI for
+    els.gpsStatusText.textContent = GPS_ERROR_MESSAGES[reason] || GPS_ERROR_MESSAGES.unknown;
+    els.gpsStatusBadge.classList.remove('hidden');
   });
   state.tripTracker.start();
   state.driveStartedAt = Date.now();
@@ -311,6 +345,73 @@ function resizeCanvasToVideo() {
   const rect = els.viewDrive.getBoundingClientRect();
   els.overlayCanvas.width = rect.width;
   els.overlayCanvas.height = rect.height;
+}
+
+// iOS Safari (16.4+) exposes each physical rear lens as its own labeled device — this lets
+// the driver pick the ultra-wide ("0.5x") lens to see more of the road at once. Most Android
+// browsers only expose one combined back camera, in which case this quietly does nothing.
+async function setupLensSwitcher(currentStream) {
+  els.lensSwitcher.innerHTML = '';
+  els.lensSwitcher.classList.add('hidden');
+
+  if (!navigator.mediaDevices.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+
+  const backCameras = devices.filter(
+    (d) => d.kind === 'videoinput' && /back|rear|environment/i.test(d.label)
+  );
+  if (backCameras.length < 2) return;
+
+  const classify = (label) => {
+    if (/ultra.?wide/i.test(label)) return { order: 0, zoomLabel: '0.5x' };
+    if (/tele/i.test(label)) return { order: 2, zoomLabel: '2x' };
+    return { order: 1, zoomLabel: '1x' };
+  };
+
+  const currentDeviceId = currentStream.getVideoTracks()[0]?.getSettings().deviceId || null;
+  state.activeLensDeviceId = currentDeviceId;
+
+  const lenses = backCameras
+    .map((d) => ({ deviceId: d.deviceId, ...classify(d.label) }))
+    .sort((a, b) => a.order - b.order);
+
+  for (const lens of lenses) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lens-btn' + (lens.deviceId === currentDeviceId ? ' active' : '');
+    btn.textContent = lens.zoomLabel;
+    btn.dataset.deviceId = lens.deviceId;
+    btn.addEventListener('click', () => switchLens(lens.deviceId));
+    els.lensSwitcher.appendChild(btn);
+  }
+
+  els.lensSwitcher.classList.remove('hidden');
+}
+
+async function switchLens(deviceId) {
+  if (deviceId === state.activeLensDeviceId) return;
+
+  let newStream;
+  try {
+    newStream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+  } catch (err) {
+    console.error('Failed to switch camera lens', err);
+    return;
+  }
+
+  if (state.mediaStream) {
+    for (const track of state.mediaStream.getTracks()) track.stop();
+  }
+  state.mediaStream = newStream;
+  els.cameraVideo.srcObject = newStream;
+  state.activeLensDeviceId = deviceId;
+
+  for (const btn of els.lensSwitcher.children) {
+    btn.classList.toggle('active', btn.dataset.deviceId === deviceId);
+  }
 }
 
 function showDriveError(message) {
@@ -370,8 +471,14 @@ function startDrawLoop() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (video.videoWidth && video.videoHeight && state.latestTracks.length) {
-      const scaleX = canvas.width / video.videoWidth;
-      const scaleY = canvas.height / video.videoHeight;
+      // #camera-video is styled with object-fit: cover, which scales the video uniformly to
+      // fill the canvas box (cropping whichever axis overflows) rather than stretching each
+      // axis independently — mapping boxes with separate scaleX/scaleY assumed object-fit:
+      // fill and was wrong on any device whose video aspect ratio didn't exactly match the
+      // screen (i.e. basically always, and especially so after a portrait/landscape rotation).
+      const scale = Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+      const offsetX = (canvas.width - video.videoWidth * scale) / 2;
+      const offsetY = (canvas.height - video.videoHeight * scale) / 2;
 
       ctx.lineWidth = 2.5;
       ctx.strokeStyle = '#00d9ff';
@@ -380,10 +487,10 @@ function startDrawLoop() {
 
       for (const track of state.latestTracks) {
         const [x, y, w, h] = track.bbox;
-        const canvasX = x * scaleX;
-        const canvasY = y * scaleY;
-        const canvasW = w * scaleX;
-        const canvasH = h * scaleY;
+        const canvasX = x * scale + offsetX;
+        const canvasY = y * scale + offsetY;
+        const canvasW = w * scale;
+        const canvasH = h * scale;
         ctx.strokeRect(canvasX, canvasY, canvasW, canvasH);
         ctx.fillText(track.class || 'vehicle', canvasX + 4, canvasY - 6 < 0 ? canvasY + 14 : canvasY - 6);
       }
@@ -409,6 +516,10 @@ function stopDrive({ showSummary } = { showSummary: true }) {
     state.timerIntervalId = null;
   }
   window.removeEventListener('resize', resizeCanvasToVideo);
+  if (state.resizeObserver) {
+    state.resizeObserver.disconnect();
+    state.resizeObserver = null;
+  }
 
   if (state.mediaStream) {
     for (const track of state.mediaStream.getTracks()) {
@@ -417,6 +528,11 @@ function stopDrive({ showSummary } = { showSummary: true }) {
     state.mediaStream = null;
   }
   els.cameraVideo.srcObject = null;
+
+  els.gpsStatusBadge.classList.add('hidden');
+  els.lensSwitcher.classList.add('hidden');
+  els.lensSwitcher.innerHTML = '';
+  state.activeLensDeviceId = null;
 
   let summary = null;
   if (state.tripTracker) {
