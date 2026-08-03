@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Overtaker</title>
+  <meta name="description" content="Turn your drive into a game — track overtakes and trip stats with your phone's camera and GPS." />
+  <link rel="manifest" href="./manifest.json" />
+  <meta name="theme-color" content="#0a0e17" />
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icons/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+  <!-- ==================== Onboarding overlay ==================== -->
+  <div id="onboarding-overlay">
+    <div class="onboarding-card">
+      <div class="onboarding-logo">
+        <img src="./icons/icon.svg" alt="" width="46" height="46" />
+        <h1>Overtaker</h1>
+      </div>
+      <p>
+        Overtaker uses your phone's rear camera and GPS to spot cars you overtake
+        (and cars that overtake you) while you drive — then turns it into a little
+        game with a live tally, a net score, and a trip history you can look back on.
+      </p>
+      <div class="safety-notice">
+        <span class="icon">⚠️</span>
+        <div>
+          <strong>Before you start</strong>
+          <p>
+            Mount your phone securely (windshield or dash mount) before driving.
+            Never hold or interact with your phone while the car is moving —
+            only start/end a drive or check your stats when safely parked.
+            Overtaker is for fun and is <strong>not</strong> a certified speedometer
+            or legal record. Always obey traffic laws and drive attentively.
+          </p>
+        </div>
+      </div>
+      <button id="onboarding-continue-btn" class="btn btn-primary btn-block">Got it, let's drive</button>
+    </div>
+  </div>
+
+  <!-- ==================== Dashboard ==================== -->
+  <main id="view-dashboard" class="view hidden">
+    <header class="dashboard-header">
+      <img src="./icons/icon.svg" alt="" width="40" height="40" />
+      <div class="titles">
+        <h1>Overtaker</h1>
+        <p>Every drive is a scoreboard.</p>
+      </div>
+    </header>
+
+    <button id="start-drive-btn" class="btn btn-primary">
+      <span>🏁</span><span>Start a Drive</span>
+    </button>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Total trips</div>
+        <div class="stat-value" id="stat-total-trips">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total distance</div>
+        <div class="stat-value" id="stat-total-distance">0<span class="stat-unit">km</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Net score</div>
+        <div class="stat-value" id="stat-net-score">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Best speed</div>
+        <div class="stat-value" id="stat-best-speed">0<span class="stat-unit">km/h</span></div>
+      </div>
+    </div>
+
+    <div class="section-heading">
+      <h2>Trip history</h2>
+      <span id="trip-history-count"></span>
+    </div>
+    <div id="trip-history-list">
+      <!-- trip cards injected by app.js -->
+    </div>
+  </main>
+
+  <!-- ==================== Drive view ==================== -->
+  <section id="view-drive" class="view hidden">
+    <video id="camera-video" muted playsinline autoplay></video>
+    <canvas id="overlay-canvas"></canvas>
+
+    <div class="drive-topbar">
+      <div class="speed-cluster">
+        <div id="live-speed">0</div>
+        <div class="speed-unit">km/h</div>
+        <div id="live-timer">00:00</div>
+      </div>
+    </div>
+
+    <div class="side-counters">
+      <div class="counter-pill overtook" id="count-overtook-pill">
+        <div class="icon">🚀</div>
+        <div class="count" id="count-overtook">0</div>
+        <div class="label">Overtook</div>
+      </div>
+      <div class="counter-pill overtaken" id="count-overtaken-pill">
+        <div class="icon">💨</div>
+        <div class="count" id="count-overtaken">0</div>
+        <div class="label">Overtaken</div>
+      </div>
+    </div>
+
+    <div id="event-toast-container" aria-live="polite"></div>
+
+    <div id="model-loading-badge" class="model-loading-badge hidden">
+      <div class="spinner"></div>
+      <span>Loading vision model…</span>
+    </div>
+
+    <div id="drive-error" class="drive-error hidden">
+      <div class="drive-error-card">
+        <div class="icon">🚫</div>
+        <h3>Camera unavailable</h3>
+        <p id="drive-error-message">We couldn't access your camera. Check your permissions and try again.</p>
+        <button id="drive-error-back-btn" class="btn btn-secondary btn-block">Back to dashboard</button>
+      </div>
+    </div>
+
+    <div class="drive-bottombar">
+      <button id="end-drive-btn" class="btn btn-danger">End Drive</button>
+    </div>
+  </section>
+
+  <!-- ==================== Summary modal ==================== -->
+  <div id="summary-modal" class="hidden">
+    <div class="summary-sheet">
+      <h2>Drive complete 🏁</h2>
+      <p class="summary-sub">Here's how it went.</p>
+
+      <div class="summary-grid">
+        <div class="stat-card">
+          <div class="stat-label">Distance</div>
+          <div class="stat-value" id="summary-distance">0<span class="stat-unit">km</span></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Duration</div>
+          <div class="stat-value" id="summary-duration">0:00</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg speed</div>
+          <div class="stat-value" id="summary-avg-speed">0<span class="stat-unit">km/h</span></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Top speed</div>
+          <div class="stat-value" id="summary-top-speed">0<span class="stat-unit">km/h</span></div>
+        </div>
+      </div>
+
+      <div class="summary-tally">
+        <div class="tally-item overtook">
+          <div class="val" id="summary-overtook">0</div>
+          <div class="lbl">Overtook</div>
+        </div>
+        <div class="tally-item overtaken">
+          <div class="val" id="summary-overtaken">0</div>
+          <div class="lbl">Overtaken</div>
+        </div>
+      </div>
+
+      <div id="summary-net-message">Nice drive!</div>
+
+      <button id="summary-save-btn" class="btn btn-primary btn-block">Save &amp; back to dashboard</button>
+    </div>
+  </div>
+
+  <!-- TensorFlow.js + coco-ssd loaded as classic globals before our module -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script type="module" src="./js/app.js"></script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

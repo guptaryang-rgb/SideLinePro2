@@ -1,0 +1,17 @@
+{
+  "name": "Overtaker",
+  "short_name": "Overtaker",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0a0e17",
+  "theme_color": "#0a0e17",
+  "description": "Turn your drive into a game — track overtakes and trip stats with your phone's camera and GPS.",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,504 @@
+// app.js — Overtaker controller. Wires the UI to CarTracker (detection.js)
+// and TripTracker / TripHistory (trip.js). Modern ES module, no globals on window.
+
+import { CarTracker } from './detection.js';
+import { TripTracker, TripHistory } from './trip.js';
+
+const ONBOARDING_KEY = 'overtaker_onboarded';
+const DETECTION_INTERVAL_MS = 200;
+
+// ---------------------------------------------------------------------------
+// DOM references
+// ---------------------------------------------------------------------------
+
+const els = {
+  onboardingOverlay: document.getElementById('onboarding-overlay'),
+  onboardingContinueBtn: document.getElementById('onboarding-continue-btn'),
+
+  viewDashboard: document.getElementById('view-dashboard'),
+  startDriveBtn: document.getElementById('start-drive-btn'),
+  statTotalTrips: document.getElementById('stat-total-trips'),
+  statTotalDistance: document.getElementById('stat-total-distance'),
+  statNetScore: document.getElementById('stat-net-score'),
+  statBestSpeed: document.getElementById('stat-best-speed'),
+  tripHistoryList: document.getElementById('trip-history-list'),
+  tripHistoryCount: document.getElementById('trip-history-count'),
+
+  viewDrive: document.getElementById('view-drive'),
+  cameraVideo: document.getElementById('camera-video'),
+  overlayCanvas: document.getElementById('overlay-canvas'),
+  liveSpeed: document.getElementById('live-speed'),
+  liveTimer: document.getElementById('live-timer'),
+  countOvertook: document.getElementById('count-overtook'),
+  countOvertaken: document.getElementById('count-overtaken'),
+  countOvertookPill: document.getElementById('count-overtook-pill'),
+  countOvertakenPill: document.getElementById('count-overtaken-pill'),
+  toastContainer: document.getElementById('event-toast-container'),
+  modelLoadingBadge: document.getElementById('model-loading-badge'),
+  driveError: document.getElementById('drive-error'),
+  driveErrorMessage: document.getElementById('drive-error-message'),
+  driveErrorBackBtn: document.getElementById('drive-error-back-btn'),
+  endDriveBtn: document.getElementById('end-drive-btn'),
+
+  summaryModal: document.getElementById('summary-modal'),
+  summaryDistance: document.getElementById('summary-distance'),
+  summaryDuration: document.getElementById('summary-duration'),
+  summaryAvgSpeed: document.getElementById('summary-avg-speed'),
+  summaryTopSpeed: document.getElementById('summary-top-speed'),
+  summaryOvertook: document.getElementById('summary-overtook'),
+  summaryOvertaken: document.getElementById('summary-overtaken'),
+  summaryNetMessage: document.getElementById('summary-net-message'),
+  summarySaveBtn: document.getElementById('summary-save-btn'),
+};
+
+// ---------------------------------------------------------------------------
+// Module-scoped state (no globals on window)
+// ---------------------------------------------------------------------------
+
+const state = {
+  carTracker: null,
+  tripTracker: null,
+  mediaStream: null,
+  detectionTimer: null,
+  rafId: null,
+  latestTracks: [],
+  overtakesByMe: 0,
+  overtakesOfMe: 0,
+  driveStartedAt: null,
+  liveDurationSec: 0,
+  liveTopSpeedKmh: 0,
+  lastSummary: null,
+  timerIntervalId: null,
+};
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function formatDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatDurationLong(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  return `${mins} min`;
+}
+
+function formatDate(timestamp) {
+  const d = new Date(timestamp);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+    ' · ' +
+    d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+function round1(n) {
+  return Math.round((n + Number.EPSILON) * 10) / 10;
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+function initOnboarding() {
+  const alreadyOnboarded = localStorage.getItem(ONBOARDING_KEY) === '1';
+  if (alreadyOnboarded) {
+    els.onboardingOverlay.classList.add('hidden');
+  } else {
+    els.onboardingOverlay.classList.remove('hidden');
+  }
+
+  els.onboardingContinueBtn.addEventListener('click', () => {
+    try {
+      localStorage.setItem(ONBOARDING_KEY, '1');
+    } catch {
+      // Ignore storage failures (e.g. private browsing) — just proceed.
+    }
+    els.onboardingOverlay.classList.add('hidden');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard rendering
+// ---------------------------------------------------------------------------
+
+async function renderDashboard() {
+  const [aggregate, trips] = await Promise.all([
+    TripHistory.getAggregateStats(),
+    TripHistory.getAllTrips(),
+  ]);
+
+  els.statTotalTrips.textContent = String(aggregate.totalTrips);
+  els.statTotalDistance.innerHTML = `${round1(aggregate.totalDistanceKm)}<span class="stat-unit">km</span>`;
+  els.statNetScore.textContent =
+    aggregate.netScore > 0 ? `+${aggregate.netScore}` : String(aggregate.netScore);
+  els.statBestSpeed.innerHTML = `${Math.round(aggregate.bestTopSpeedKmh)}<span class="stat-unit">km/h</span>`;
+
+  els.tripHistoryCount.textContent = trips.length ? `${trips.length} drive${trips.length === 1 ? '' : 's'}` : '';
+
+  els.tripHistoryList.innerHTML = '';
+
+  if (trips.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'No drives yet — start one to build your history.';
+    els.tripHistoryList.appendChild(empty);
+    return;
+  }
+
+  for (const trip of trips) {
+    els.tripHistoryList.appendChild(buildTripCard(trip));
+  }
+}
+
+function buildTripCard(trip) {
+  const net = (trip.overtakesByMe || 0) - (trip.overtakesOfMe || 0);
+  const netClass = net > 0 ? 'positive' : net < 0 ? 'negative' : 'neutral';
+  const netLabel = net > 0 ? `+${net}` : String(net);
+
+  const card = document.createElement('div');
+  card.className = 'trip-card';
+  card.innerHTML = `
+    <div class="trip-card-top">
+      <div class="trip-card-date">${formatDate(trip.startedAt)}</div>
+      <div class="trip-card-net ${netClass}">${netLabel} net</div>
+    </div>
+    <div class="trip-card-stats">
+      <div><div class="val">${round1(trip.distanceKm || 0)}</div><div class="lbl">km</div></div>
+      <div><div class="val">${formatDurationLong(trip.durationSec || 0)}</div><div class="lbl">duration</div></div>
+      <div><div class="val">${Math.round(trip.avgSpeedKmh || 0)}</div><div class="lbl">avg km/h</div></div>
+      <div><div class="val">${Math.round(trip.topSpeedKmh || 0)}</div><div class="lbl">top km/h</div></div>
+    </div>
+    <button class="trip-card-delete" type="button">Delete trip</button>
+  `;
+
+  const deleteBtn = card.querySelector('.trip-card-delete');
+  deleteBtn.addEventListener('click', async () => {
+    try {
+      await TripHistory.deleteTrip(trip.id);
+    } catch (err) {
+      console.error('Failed to delete trip', err);
+    }
+    renderDashboard();
+  });
+
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// View switching
+// ---------------------------------------------------------------------------
+
+function showView(view) {
+  els.viewDashboard.classList.toggle('hidden', view !== 'dashboard');
+  els.viewDrive.classList.toggle('hidden', view !== 'drive');
+}
+
+// ---------------------------------------------------------------------------
+// Toasts
+// ---------------------------------------------------------------------------
+
+const TOAST_COPY = {
+  overtook: ['You overtook a car! 🎉', 'Cleared another one! 🚀', 'Smooth pass! 🏎️'],
+  overtaken: ['A car overtook you 💨', 'Someone just blew by 😅', 'Getting passed happens 💨'],
+};
+
+function showToast(type) {
+  const messages = TOAST_COPY[type] || [];
+  const message = messages[Math.floor(Math.random() * messages.length)] || '';
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  els.toastContainer.appendChild(toast);
+
+  setTimeout(() => {
+    toast.classList.add('leaving');
+    setTimeout(() => toast.remove(), 300);
+  }, 2500);
+}
+
+function pulsePill(pillEl) {
+  pillEl.classList.remove('pulse');
+  // Force reflow so the animation can restart on rapid repeated events.
+  void pillEl.offsetWidth;
+  pillEl.classList.add('pulse');
+}
+
+// ---------------------------------------------------------------------------
+// Drive lifecycle
+// ---------------------------------------------------------------------------
+
+async function startDrive() {
+  showView('drive');
+  els.driveError.classList.add('hidden');
+  els.overlayCanvas.getContext('2d').clearRect(0, 0, els.overlayCanvas.width, els.overlayCanvas.height);
+
+  state.overtakesByMe = 0;
+  state.overtakesOfMe = 0;
+  state.latestTracks = [];
+  state.liveTopSpeedKmh = 0;
+  els.countOvertook.textContent = '0';
+  els.countOvertaken.textContent = '0';
+  els.liveSpeed.textContent = '0';
+  els.liveTimer.textContent = '00:00';
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+      audio: false,
+    });
+  } catch (err) {
+    console.error('getUserMedia failed', err);
+    showDriveError(
+      err && err.name === 'NotAllowedError'
+        ? 'Camera permission was denied. Allow camera access in your browser settings and try again.'
+        : "We couldn't access your camera. Make sure it isn't in use by another app and try again."
+    );
+    return;
+  }
+
+  state.mediaStream = stream;
+  els.cameraVideo.srcObject = stream;
+
+  try {
+    await els.cameraVideo.play();
+  } catch {
+    // Autoplay can reject on some browsers until a user gesture; the click
+    // that triggered startDrive() already counts as one, so this is rare.
+  }
+
+  resizeCanvasToVideo();
+  window.addEventListener('resize', resizeCanvasToVideo);
+
+  // Vision model loads in the background — the drive/GPS side starts immediately.
+  els.modelLoadingBadge.classList.remove('hidden');
+  state.carTracker = new CarTracker();
+  state.carTracker
+    .load()
+    .then(() => {
+      els.modelLoadingBadge.classList.add('hidden');
+      startDetectionLoop();
+    })
+    .catch((err) => {
+      console.error('Vision model failed to load', err);
+      els.modelLoadingBadge.classList.add('hidden');
+    });
+
+  state.tripTracker = new TripTracker();
+  state.tripTracker.onUpdate((liveStats) => {
+    els.liveSpeed.textContent = String(Math.round(liveStats.speedKmh || 0));
+    state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
+  });
+  state.tripTracker.start();
+  state.driveStartedAt = Date.now();
+
+  state.timerIntervalId = setInterval(() => {
+    const elapsed = (Date.now() - state.driveStartedAt) / 1000;
+    els.liveTimer.textContent = formatDuration(elapsed);
+  }, 1000);
+
+  startDrawLoop();
+}
+
+function resizeCanvasToVideo() {
+  const rect = els.viewDrive.getBoundingClientRect();
+  els.overlayCanvas.width = rect.width;
+  els.overlayCanvas.height = rect.height;
+}
+
+function showDriveError(message) {
+  els.driveErrorMessage.textContent = message;
+  els.driveError.classList.remove('hidden');
+}
+
+function startDetectionLoop() {
+  if (state.detectionTimer) return;
+  state.detectionTimer = setInterval(async () => {
+    if (!state.carTracker || !state.carTracker.ready) return;
+    const video = els.cameraVideo;
+    if (!video.videoWidth || !video.videoHeight) return;
+
+    try {
+      const detections = await state.carTracker.detectVehicles(video);
+      const { tracks, events } = state.carTracker.update(detections, video.videoWidth, video.videoHeight);
+      state.latestTracks = tracks;
+
+      for (const event of events) {
+        handleOvertakeEvent(event);
+      }
+    } catch (err) {
+      console.error('Detection tick failed', err);
+    }
+  }, DETECTION_INTERVAL_MS);
+}
+
+function handleOvertakeEvent(event) {
+  if (event.type === 'overtook') {
+    state.overtakesByMe += 1;
+    els.countOvertook.textContent = String(state.overtakesByMe);
+    pulsePill(els.countOvertookPill);
+    showToast('overtook');
+  } else if (event.type === 'overtaken') {
+    state.overtakesOfMe += 1;
+    els.countOvertaken.textContent = String(state.overtakesOfMe);
+    pulsePill(els.countOvertakenPill);
+    showToast('overtaken');
+  }
+}
+
+function startDrawLoop() {
+  const ctx = els.overlayCanvas.getContext('2d');
+
+  const draw = () => {
+    const canvas = els.overlayCanvas;
+    const video = els.cameraVideo;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (video.videoWidth && video.videoHeight && state.latestTracks.length) {
+      const scaleX = canvas.width / video.videoWidth;
+      const scaleY = canvas.height / video.videoHeight;
+
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#00d9ff';
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = '#00d9ff';
+
+      for (const track of state.latestTracks) {
+        const [x, y, w, h] = track.bbox;
+        const canvasX = x * scaleX;
+        const canvasY = y * scaleY;
+        const canvasW = w * scaleX;
+        const canvasH = h * scaleY;
+        ctx.strokeRect(canvasX, canvasY, canvasW, canvasH);
+        ctx.fillText(track.class || 'vehicle', canvasX + 4, canvasY - 6 < 0 ? canvasY + 14 : canvasY - 6);
+      }
+    }
+
+    state.rafId = requestAnimationFrame(draw);
+  };
+
+  state.rafId = requestAnimationFrame(draw);
+}
+
+function stopDrive({ showSummary } = { showSummary: true }) {
+  if (state.detectionTimer) {
+    clearInterval(state.detectionTimer);
+    state.detectionTimer = null;
+  }
+  if (state.rafId) {
+    cancelAnimationFrame(state.rafId);
+    state.rafId = null;
+  }
+  if (state.timerIntervalId) {
+    clearInterval(state.timerIntervalId);
+    state.timerIntervalId = null;
+  }
+  window.removeEventListener('resize', resizeCanvasToVideo);
+
+  if (state.mediaStream) {
+    for (const track of state.mediaStream.getTracks()) {
+      track.stop();
+    }
+    state.mediaStream = null;
+  }
+  els.cameraVideo.srcObject = null;
+
+  let summary = null;
+  if (state.tripTracker) {
+    summary = state.tripTracker.stop();
+    state.tripTracker = null;
+  }
+
+  if (state.carTracker) {
+    state.carTracker.reset();
+    state.carTracker = null;
+  }
+
+  if (showSummary && summary) {
+    presentSummary(summary);
+  }
+}
+
+function netScoreMessage(net) {
+  if (net > 3) return `Absolute legend — you overtook ${net} more than got past you. 🏆`;
+  if (net > 0) return `Net +${net}. You came out ahead today. 😎`;
+  if (net === 0) return "Dead even — nobody won this one. Rematch tomorrow? 🤝";
+  if (net > -4) return `Net ${net}. A tough crowd out there today. 😅`;
+  return `Net ${net}. Rough one — the highway had other plans. 🫠`;
+}
+
+function presentSummary(summary) {
+  const net = state.overtakesByMe - state.overtakesOfMe;
+
+  state.lastSummary = {
+    startedAt: summary.startedAt,
+    endedAt: summary.endedAt,
+    durationSec: summary.durationSec,
+    distanceKm: summary.distanceKm,
+    avgSpeedKmh: summary.avgSpeedKmh,
+    topSpeedKmh: Math.max(summary.topSpeedKmh, state.liveTopSpeedKmh),
+    overtakesByMe: state.overtakesByMe,
+    overtakesOfMe: state.overtakesOfMe,
+  };
+
+  els.summaryDistance.innerHTML = `${round1(summary.distanceKm)}<span class="stat-unit">km</span>`;
+  els.summaryDuration.textContent = formatDuration(summary.durationSec);
+  els.summaryAvgSpeed.innerHTML = `${Math.round(summary.avgSpeedKmh)}<span class="stat-unit">km/h</span>`;
+  els.summaryTopSpeed.innerHTML = `${Math.round(state.lastSummary.topSpeedKmh)}<span class="stat-unit">km/h</span>`;
+  els.summaryOvertook.textContent = String(state.overtakesByMe);
+  els.summaryOvertaken.textContent = String(state.overtakesOfMe);
+  els.summaryNetMessage.textContent = netScoreMessage(net);
+
+  els.summaryModal.classList.remove('hidden');
+}
+
+async function saveSummaryAndReturn() {
+  if (state.lastSummary) {
+    try {
+      await TripHistory.saveTrip({ ...state.lastSummary });
+    } catch (err) {
+      console.error('Failed to save trip', err);
+    }
+  }
+  state.lastSummary = null;
+  els.summaryModal.classList.add('hidden');
+  showView('dashboard');
+  renderDashboard();
+}
+
+// ---------------------------------------------------------------------------
+// Event wiring
+// ---------------------------------------------------------------------------
+
+function init() {
+  initOnboarding();
+  renderDashboard();
+  showView('dashboard');
+
+  els.startDriveBtn.addEventListener('click', () => {
+    startDrive();
+  });
+
+  els.endDriveBtn.addEventListener('click', () => {
+    stopDrive({ showSummary: true });
+  });
+
+  els.driveErrorBackBtn.addEventListener('click', () => {
+    stopDrive({ showSummary: false });
+    els.driveError.classList.add('hidden');
+    showView('dashboard');
+  });
+
+  els.summarySaveBtn.addEventListener('click', () => {
+    saveSummaryAndReturn();
+  });
+}
+
+init();

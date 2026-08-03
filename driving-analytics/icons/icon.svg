@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="192" y2="192" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f1420"/>
+      <stop offset="1" stop-color="#0a0e17"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="30" y1="150" x2="162" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00d9ff"/>
+      <stop offset="1" stop-color="#39ff9d"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="40" fill="url(#bg)"/>
+  <!-- motion streaks -->
+  <rect x="20" y="80" width="34" height="8" rx="4" fill="url(#accent)" opacity="0.55"/>
+  <rect x="20" y="98" width="22" height="8" rx="4" fill="url(#accent)" opacity="0.35"/>
+  <!-- car silhouette (overtaking chevron shape) -->
+  <path d="M56 122c0-8 6-15 14-17l10-3 10-20c3-6 9-10 16-10h22c8 0 15 5 18 12l7 16 9 3c6 2 10 8 10 14v10c0 5-4 9-9 9h-6a13 13 0 0 1-26 0H92a13 13 0 0 1-26 0h-1c-5 0-9-4-9-9z" fill="url(#accent)"/>
+  <circle cx="79" cy="132" r="9" fill="#0a0e17"/>
+  <circle cx="79" cy="132" r="4" fill="url(#accent)"/>
+  <circle cx="139" cy="132" r="9" fill="#0a0e17"/>
+  <circle cx="139" cy="132" r="4" fill="url(#accent)"/>
+  <!-- forward chevron -->
+  <path d="M150 70l14-12-14-12" stroke="url(#accent)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
