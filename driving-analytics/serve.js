@@ -77,7 +77,14 @@ const server = http.createServer((req, res) => {
         res.end('404 Not Found');
         return;
       }
-      res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
+      const headers = { 'Content-Type': contentTypeFor(filePath) };
+      // The service worker script must never be HTTP-cached, or the browser's update-check
+      // (which relies on re-fetching this exact file and byte-comparing it) can silently stop
+      // seeing new versions — this bit Overtaker in the field once already.
+      if (path.basename(filePath) === 'sw.js') {
+        headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      }
+      res.writeHead(200, headers);
       res.end(data);
     });
   });

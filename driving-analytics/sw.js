@@ -1,8 +1,13 @@
-// sw.js — minimal cache-first service worker for the Overtaker app shell.
-// Deliberately does NOT cache the TensorFlow.js / coco-ssd CDN scripts —
+// sw.js — network-first service worker for the Overtaker app shell, falling back to cache
+// only when offline. Deliberately does NOT cache the TensorFlow.js / coco-ssd CDN scripts —
 // those are left to the network and the browser's own HTTP cache.
+//
+// Bump CACHE_NAME whenever the app shell changes so browsers reliably pick up the new
+// service worker (they only re-check when this file's own bytes differ) — but the
+// network-first fetch strategy below means an app-shell update reaches users on their very
+// next load even if this version bump is ever forgotten.
 
-const CACHE_NAME = 'overtaker-v1';
+const CACHE_NAME = 'overtaker-v2';
 
 const APP_SHELL = [
   '/',
@@ -44,9 +49,12 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
 
   event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached;
-      return fetch(request).catch(() => cached);
-    })
+    fetch(request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });
