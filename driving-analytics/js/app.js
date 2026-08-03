@@ -251,7 +251,7 @@ async function startDrive() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' },
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
   } catch (err) {
@@ -320,11 +320,17 @@ function showDriveError(message) {
 
 function startDetectionLoop() {
   if (state.detectionTimer) return;
+  // Guards against overlapping ticks: 'mobilenet_v2' inference can take longer than the poll
+  // interval on some phones, and firing detect()/update() again before the previous call
+  // finishes would race on the tracker's shared state.
+  let detectionInFlight = false;
   state.detectionTimer = setInterval(async () => {
+    if (detectionInFlight) return;
     if (!state.carTracker || !state.carTracker.ready) return;
     const video = els.cameraVideo;
     if (!video.videoWidth || !video.videoHeight) return;
 
+    detectionInFlight = true;
     try {
       const detections = await state.carTracker.detectVehicles(video);
       const { tracks, events } = state.carTracker.update(detections, video.videoWidth, video.videoHeight);
@@ -335,6 +341,8 @@ function startDetectionLoop() {
       }
     } catch (err) {
       console.error('Detection tick failed', err);
+    } finally {
+      detectionInFlight = false;
     }
   }, DETECTION_INTERVAL_MS);
 }
