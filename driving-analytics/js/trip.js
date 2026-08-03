@@ -3,7 +3,7 @@
 // IndexedDB (with a localStorage fallback). No external dependencies.
 
 const EARTH_RADIUS_KM = 6371;
-const MAX_ACCEPTABLE_ACCURACY_M = 50;
+const MAX_ACCEPTABLE_ACCURACY_M = 100;
 const MAX_PLAUSIBLE_SPEED_KMH = 250;
 
 /**
@@ -110,59 +110,52 @@ export class TripTracker {
 
   _onPosition(pos) {
     const { latitude, longitude, accuracy, speed } = pos.coords;
+    const hasDeviceSpeed = typeof speed === 'number' && isFinite(speed) && speed >= 0;
 
-    if (typeof accuracy === 'number' && accuracy > MAX_ACCEPTABLE_ACCURACY_M) {
-      // GPS noise guard — skip entirely, don't record the route point.
-      return;
+    // Device-reported speed comes from the GPS chip's Doppler measurement, which stays
+    // meaningful even when the position fix itself is coarse — so it isn't gated behind the
+    // accuracy check below (real driving accuracy routinely exceeds a strict threshold, and
+    // gating this too tightly meant live speed just never updated on real drives).
+    if (hasDeviceSpeed) {
+      const deviceSpeedKmh = speed * 3.6;
+      if (deviceSpeedKmh <= MAX_PLAUSIBLE_SPEED_KMH) {
+        this._lastInstantSpeedKmh = deviceSpeedKmh;
+        this.topSpeedKmh = Math.max(this.topSpeedKmh, deviceSpeedKmh);
+      }
     }
 
-    const point = { lat: latitude, lng: longitude, t: Date.now() };
-    this.route.push(point);
+    const accuracyOk = typeof accuracy !== 'number' || accuracy <= MAX_ACCEPTABLE_ACCURACY_M;
+    if (accuracyOk) {
+      const point = { lat: latitude, lng: longitude, t: Date.now() };
+      this.route.push(point);
 
-    let instantSpeedKmh = null;
+      if (this.lastSample) {
+        const deltaKm = haversine(
+          this.lastSample.lat,
+          this.lastSample.lng,
+          point.lat,
+          point.lng
+        );
+        const deltaHours = (point.t - this.lastSample.t) / 3600000;
+        const derivedSpeedKmh = deltaHours > 0 ? deltaKm / deltaHours : 0;
 
-    if (this.lastSample) {
-      const deltaKm = haversine(
-        this.lastSample.lat,
-        this.lastSample.lng,
-        point.lat,
-        point.lng
-      );
-      const deltaHours = (point.t - this.lastSample.t) / 3600000;
-      const derivedSpeedKmh = deltaHours > 0 ? deltaKm / deltaHours : 0;
-
-      if (derivedSpeedKmh <= MAX_PLAUSIBLE_SPEED_KMH) {
-        // Prefer the device-reported instantaneous speed when valid.
-        if (typeof speed === 'number' && isFinite(speed) && speed >= 0) {
-          instantSpeedKmh = speed * 3.6;
-        } else {
-          instantSpeedKmh = derivedSpeedKmh;
-        }
-
-        // Sanity-cap the chosen speed too, then accept distance/speed/topSpeed.
-        if (instantSpeedKmh <= MAX_PLAUSIBLE_SPEED_KMH) {
+        if (derivedSpeedKmh <= MAX_PLAUSIBLE_SPEED_KMH) {
           this.distanceKm += deltaKm;
-          this._lastInstantSpeedKmh = instantSpeedKmh;
-          this.topSpeedKmh = Math.max(this.topSpeedKmh, instantSpeedKmh);
-        } else {
-          instantSpeedKmh = null;
+          // Only fall back to the derived speed when the device didn't already give us one.
+          if (!hasDeviceSpeed) {
+            this._lastInstantSpeedKmh = derivedSpeedKmh;
+            this.topSpeedKmh = Math.max(this.topSpeedKmh, derivedSpeedKmh);
+          }
         }
+        // else: unrealistic implied speed (GPS jitter) — discard this sample's distance
+        // contribution, but still update lastSample & route below.
       }
-      // else: unrealistic implied speed — discard this sample's
-      // speed/distance contribution, but still update lastSample & route below.
-    } else {
-      // First sample of the trip: use device speed if available.
-      if (typeof speed === 'number' && isFinite(speed) && speed >= 0) {
-        const deviceSpeedKmh = speed * 3.6;
-        if (deviceSpeedKmh <= MAX_PLAUSIBLE_SPEED_KMH) {
-          this._lastInstantSpeedKmh = deviceSpeedKmh;
-          this.topSpeedKmh = Math.max(this.topSpeedKmh, deviceSpeedKmh);
-        }
-      }
+
+      this.lastSample = point;
     }
 
-    this.lastSample = point;
-
+    // Always notify listeners so live speed/timer keep updating through a run of low-accuracy
+    // fixes — only distance/route accumulation (above) is gated on position accuracy.
     const liveStats = this.getLiveStats();
     for (const listener of this._listeners) {
       try {

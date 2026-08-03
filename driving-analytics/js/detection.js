@@ -3,12 +3,16 @@
 
 export const VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle'];
 
+// Tuned from real-drive testing: a dash-mounted phone's wide field of view means a car one
+// lane over rarely fills much of the frame, and the default fast model missed distant cars
+// outright — so closeWidthRatio/scoreThreshold are relaxed and minTrackAgeFrames/maxMissedFrames
+// are more forgiving of the gaps that noisier detections leave in a track's history.
 const DEFAULT_OPTS = {
-  maxMissedFrames: 8,
-  minTrackAgeFrames: 6,
-  closeWidthRatio: 0.18,
+  maxMissedFrames: 10,
+  minTrackAgeFrames: 4,
+  closeWidthRatio: 0.1,
   matchDistanceRatio: 0.15,
-  scoreThreshold: 0.5,
+  scoreThreshold: 0.4,
 };
 
 const bboxIou = (a, b) => {
@@ -46,7 +50,10 @@ export class CarTracker {
   }
 
   async load() {
-    this.model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    // 'mobilenet_v2' trades some inference speed for materially better accuracy on small/
+    // distant objects than the default 'lite_mobilenet_v2' — worth it here since missing far
+    // cars was the main complaint and our detection loop already tolerates slower ticks.
+    this.model = await cocoSsd.load({ base: 'mobilenet_v2' });
     this.ready = true;
   }
 
