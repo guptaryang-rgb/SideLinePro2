@@ -33,6 +33,7 @@ export class TripTracker {
     this.route = []; // array of {lat, lng, t}
     this._lastInstantSpeedKmh = 0;
     this._listeners = [];
+    this._errorListeners = [];
   }
 
   start() {
@@ -50,20 +51,21 @@ export class TripTracker {
       !navigator.geolocation ||
       typeof navigator.geolocation.watchPosition !== 'function'
     ) {
-      // Fail silently — getLiveStats() still returns safe zeroed values.
+      this._notifyError('unsupported');
       return;
     }
 
     try {
       this.watchId = navigator.geolocation.watchPosition(
         (pos) => this._onPosition(pos),
-        () => {
-          // Swallow errors silently — no throw, no console spam.
-        },
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+        (err) => this._onPositionError(err),
+        // A cold GPS fix in a moving car can genuinely take longer than a few seconds;
+        // 10s was timing out (and silently going nowhere) before a fix was ever acquired.
+        { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 }
       );
     } catch {
       this.watchId = null;
+      this._notifyError('unsupported');
     }
   }
 
@@ -102,6 +104,29 @@ export class TripTracker {
       distanceKm: this.distanceKm,
       durationSec,
     };
+  }
+
+  onError(callback) {
+    this._errorListeners.push(callback);
+  }
+
+  _onPositionError(err) {
+    const code = err && err.code;
+    let reason = 'unknown';
+    if (code === 1) reason = 'permission_denied';
+    else if (code === 2) reason = 'position_unavailable';
+    else if (code === 3) reason = 'timeout';
+    this._notifyError(reason);
+  }
+
+  _notifyError(reason) {
+    for (const listener of this._errorListeners) {
+      try {
+        listener(reason);
+      } catch {
+        // Never let a listener error break the tracking loop.
+      }
+    }
   }
 
   onUpdate(callback) {

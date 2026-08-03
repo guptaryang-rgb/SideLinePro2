@@ -625,12 +625,19 @@ body {
   width: 100%;
 }
 
-.model-loading-badge {
+.status-badges {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-badge {
   background: rgba(9, 12, 19, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-md);
@@ -640,6 +647,34 @@ body {
   gap: 10px;
   font-size: 14px;
   color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.lens-switcher {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.lens-btn {
+  background: rgba(9, 12, 19, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  min-width: 44px;
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.lens-btn.active {
+  background: var(--accent);
+  color: #06212b;
+  border-color: transparent;
 }
 
 .spinner {

@@ -100,6 +100,7 @@
         <div class="speed-unit">km/h</div>
         <div id="live-timer">00:00</div>
       </div>
+      <div id="lens-switcher" class="lens-switcher hidden"></div>
     </div>
 
     <div class="side-counters">
@@ -117,9 +118,15 @@
 
     <div id="event-toast-container" aria-live="polite"></div>
 
-    <div id="model-loading-badge" class="model-loading-badge hidden">
-      <div class="spinner"></div>
-      <span>Loading vision model…</span>
+    <div class="status-badges">
+      <div id="model-loading-badge" class="status-badge hidden">
+        <div class="spinner"></div>
+        <span>Loading vision model…</span>
+      </div>
+      <div id="gps-status-badge" class="status-badge hidden">
+        <div class="spinner"></div>
+        <span id="gps-status-text">Waiting for GPS…</span>
+      </div>
     </div>
 
     <div id="drive-error" class="drive-error hidden">
