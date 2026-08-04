@@ -140,6 +140,18 @@
       </div>
     </div>
 
+    <div id="g-meter" class="g-meter hidden">
+      <div class="g-meter-ring">
+        <div class="g-meter-crosshair-h"></div>
+        <div class="g-meter-crosshair-v"></div>
+        <div id="g-meter-peak-dot" class="g-meter-dot g-meter-dot-peak"></div>
+        <div id="g-meter-dot" class="g-meter-dot g-meter-dot-live"></div>
+      </div>
+      <div class="g-meter-label">
+        <span id="g-meter-peak-value">0.0</span><span class="g-meter-unit">g peak</span>
+      </div>
+    </div>
+
     <div id="event-toast-container" aria-live="polite"></div>
 
     <div class="status-badges">
@@ -202,6 +214,10 @@
         <div class="stat-card">
           <div class="stat-label">Top speed</div>
           <div class="stat-value" id="summary-top-speed">0<span class="stat-unit">mph</span></div>
+        </div>
+        <div class="stat-card stat-card-wide hidden" id="summary-peak-g-card">
+          <div class="stat-label">Peak G-force</div>
+          <div class="stat-value" id="summary-peak-g">0.0<span class="stat-unit">g</span></div>
         </div>
       </div>
 
