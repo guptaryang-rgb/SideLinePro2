@@ -277,6 +277,17 @@ body {
   align-items: center;
   justify-content: center;
   gap: 10px;
+  background-size: 220% 100%;
+  animation: shimmer 3.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
 }
 
 .stats-row {
@@ -291,6 +302,19 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 16px;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.stat-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.stat-icon {
+  font-size: 13px;
+  line-height: 1;
 }
 
 .stat-card .stat-label {
@@ -298,7 +322,7 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-faint);
-  margin-bottom: 6px;
+  margin-bottom: 0;
 }
 
 .stat-card .stat-value {
@@ -494,18 +518,53 @@ body {
 }
 
 .speed-cluster {
-  background: rgba(9, 12, 19, 0.72);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-lg);
-  padding: 14px 22px;
+  position: relative;
+  width: 128px;
+  height: 128px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.speed-gauge {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* A 270° gauge arc (see stroke-dasharray below) starting at 3 o'clock and running
+     clockwise; rotating 135° moves its open gap to the bottom, like a real speedometer. */
+  transform: rotate(135deg);
+}
+
+.speed-gauge-track,
+.speed-gauge-fill {
+  fill: none;
+  stroke-width: 8;
+  stroke-linecap: round;
+  /* 270/360 of the circle's circumference (2 * pi * r, r=60) visible, rest is gap. */
+  stroke-dasharray: 282.7 376.99;
+}
+
+.speed-gauge-track {
+  stroke: rgba(255, 255, 255, 0.07);
+}
+
+.speed-gauge-fill {
+  stroke: url(#speed-gauge-gradient);
+  stroke-dashoffset: 282.7;
+  transition: stroke-dashoffset 0.35s ease;
+  filter: drop-shadow(0 0 6px rgba(0, 217, 255, 0.55));
+}
+
+.speed-readout {
+  position: relative;
+  z-index: 1;
   text-align: center;
 }
 
 #live-speed {
   font-family: var(--font-numeral);
-  font-size: 52px;
+  font-size: 40px;
   font-weight: 700;
   line-height: 1;
   color: var(--accent);
@@ -514,18 +573,18 @@ body {
 }
 
 .speed-unit {
-  font-size: 12px;
+  font-size: 10.5px;
   color: var(--text-muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 #live-timer {
   font-family: var(--font-numeral);
-  font-size: 13.5px;
+  font-size: 12px;
   color: var(--text-muted);
-  margin-top: 6px;
+  margin-top: 5px;
   font-variant-numeric: tabular-nums;
 }
 

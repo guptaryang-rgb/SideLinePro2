@@ -13,7 +13,16 @@ const DEFAULT_OPTS = {
   closeWidthRatio: 0.1,
   matchDistanceRatio: 0.15,
   scoreThreshold: 0.4,
+  // How far off dead-center (as a fraction of frame width) a track must get, at either end of
+  // its life, to count as a real pass. Without this, a car directly ahead in our own lane that
+  // simply pulls away (shrinking but never leaving the center of frame) looked identical to a
+  // genuine overtake — it just eventually vanished off the top of frame, not to a side.
+  minLateralOffset: 0.08,
 };
+
+// De-dupe threshold for tiled detection: two boxes from overlapping tiles this close together
+// are almost certainly the same vehicle seen twice, not two vehicles.
+const TILE_DEDUPE_IOU = 0.4;
 
 const bboxIou = (a, b) => {
   const [ax, ay, aw, ah] = a;
@@ -47,6 +56,9 @@ export class CarTracker {
     this.nextId = 1;
     this.model = null;
     this.ready = false;
+    this.tileCount = 1;
+    this._tileCanvas = null;
+    this._tileCtx = null;
   }
 
   async load() {
@@ -57,12 +69,67 @@ export class CarTracker {
     this.ready = true;
   }
 
+  // Called whenever the active camera lens changes. The model always resizes whatever image
+  // it's given down to its own small fixed input size before inference — so a wider field of
+  // view (like an ultra-wide 0.5x lens) doesn't just show more road, it also means every car in
+  // frame ends up represented by fewer effective pixels once resized, and small/distant ones
+  // get lost. Tiling (running the model separately on overlapping left/right crops instead of
+  // the whole frame at once) keeps each region closer to the model's native input size.
+  setTileCount(n) {
+    this.tileCount = Math.max(1, Math.min(3, Math.round(n)));
+  }
+
   async detectVehicles(videoEl) {
     if (!this.ready) return [];
-    const preds = await this.model.detect(videoEl);
+    if (this.tileCount <= 1) {
+      const preds = await this.model.detect(videoEl);
+      return this._filterVehicles(preds);
+    }
+    return this._detectTiled(videoEl);
+  }
+
+  _filterVehicles(preds) {
     return preds
       .filter((p) => VEHICLE_CLASSES.includes(p.class) && p.score > this.opts.scoreThreshold)
       .map((p) => ({ bbox: p.bbox, class: p.class, score: p.score }));
+  }
+
+  async _detectTiled(videoEl) {
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    if (!vw || !vh) return [];
+
+    if (!this._tileCanvas) {
+      this._tileCanvas = document.createElement('canvas');
+      this._tileCtx = this._tileCanvas.getContext('2d');
+    }
+
+    // Each tile covers a bit more than half the frame so a vehicle straddling the seam still
+    // lands fully inside at least one tile; overlapping detections get de-duped below.
+    const tileW = Math.round(vw * 0.58);
+    const tileOffsets = [0, vw - tileW];
+    this._tileCanvas.width = tileW;
+    this._tileCanvas.height = vh;
+
+    const all = [];
+    for (const offsetX of tileOffsets) {
+      this._tileCtx.drawImage(videoEl, offsetX, 0, tileW, vh, 0, 0, tileW, vh);
+      const preds = await this.model.detect(this._tileCanvas);
+      for (const p of this._filterVehicles(preds)) {
+        all.push({ ...p, bbox: [p.bbox[0] + offsetX, p.bbox[1], p.bbox[2], p.bbox[3]] });
+      }
+    }
+    return this._dedupeOverlaps(all);
+  }
+
+  _dedupeOverlaps(detections) {
+    const sorted = [...detections].sort((a, b) => b.score - a.score);
+    const kept = [];
+    for (const det of sorted) {
+      const isDuplicate = kept.some((k) => bboxIou(k.bbox, det.bbox) > TILE_DEDUPE_IOU);
+      if (!isDuplicate) kept.push(det);
+    }
+    return kept;
   }
 
   update(detections, frameWidth, frameHeight) {
@@ -186,15 +253,28 @@ export class CarTracker {
 
     if (peakW < this.opts.closeWidthRatio) return null;
 
+    const startOffset = Math.abs(startCx - 0.5);
+    const endOffset = Math.abs(endCx - 0.5);
+
+    // A track that never gets meaningfully off-center — at neither its start nor its end — is
+    // just traffic ahead of or behind us in our own lane (catching up or pulling away in a
+    // straight line, typically lost off the top of frame), not a pass. Require real sideways
+    // presence before considering it a candidate at all.
+    if (Math.max(startOffset, endOffset) < this.opts.minLateralOffset) return null;
+
     if (
       endW - startW > 0 &&
       peakIndex >= h.length / 2 &&
-      Math.abs(endCx - 0.5) > Math.abs(startCx - 0.5)
+      endOffset > startOffset
     ) {
       return { type: 'overtook', id: track.id, timestamp: Date.now() };
     }
 
-    if (peakIndex < h.length / 2 && startW - endW > 0) {
+    if (
+      peakIndex < h.length / 2 &&
+      startW - endW > 0 &&
+      startOffset > endOffset
+    ) {
       return { type: 'overtaken', id: track.id, timestamp: Date.now() };
     }
 

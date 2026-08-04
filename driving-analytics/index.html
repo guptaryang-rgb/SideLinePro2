@@ -63,19 +63,31 @@
 
     <div class="stats-row">
       <div class="stat-card">
-        <div class="stat-label">Total trips</div>
+        <div class="stat-card-top">
+          <span class="stat-icon">🏁</span>
+          <div class="stat-label">Total trips</div>
+        </div>
         <div class="stat-value" id="stat-total-trips">0</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total distance</div>
+        <div class="stat-card-top">
+          <span class="stat-icon">🛣️</span>
+          <div class="stat-label">Total distance</div>
+        </div>
         <div class="stat-value" id="stat-total-distance">0<span class="stat-unit">km</span></div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Net score</div>
+        <div class="stat-card-top">
+          <span class="stat-icon">⚔️</span>
+          <div class="stat-label">Net score</div>
+        </div>
         <div class="stat-value" id="stat-net-score">0</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Best speed</div>
+        <div class="stat-card-top">
+          <span class="stat-icon">⚡</span>
+          <div class="stat-label">Best speed</div>
+        </div>
         <div class="stat-value" id="stat-best-speed">0<span class="stat-unit">km/h</span></div>
       </div>
     </div>
@@ -96,9 +108,21 @@
 
     <div class="drive-topbar">
       <div class="speed-cluster">
-        <div id="live-speed">0</div>
-        <div class="speed-unit">km/h</div>
-        <div id="live-timer">00:00</div>
+        <svg class="speed-gauge" viewBox="0 0 140 140" aria-hidden="true">
+          <defs>
+            <linearGradient id="speed-gauge-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00d9ff" />
+              <stop offset="100%" stop-color="#39ff9d" />
+            </linearGradient>
+          </defs>
+          <circle class="speed-gauge-track" cx="70" cy="70" r="60" />
+          <circle class="speed-gauge-fill" id="speed-gauge-fill" cx="70" cy="70" r="60" />
+        </svg>
+        <div class="speed-readout">
+          <div id="live-speed">0</div>
+          <div class="speed-unit">km/h</div>
+          <div id="live-timer">00:00</div>
+        </div>
       </div>
       <div id="lens-switcher" class="lens-switcher hidden"></div>
     </div>
