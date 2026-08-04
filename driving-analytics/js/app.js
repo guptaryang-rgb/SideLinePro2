@@ -3,12 +3,16 @@
 
 import { CarTracker } from './detection.js';
 import { TripTracker, TripHistory } from './trip.js';
+import { MotionTracker } from './motion.js';
 
 const ONBOARDING_KEY = 'overtaker_onboarded';
 const DETECTION_INTERVAL_MS = 200;
 // Must match the 270deg-arc stroke-dasharray/circumference set in styles.css for #speed-gauge-fill.
 const SPEED_GAUGE_ARC_LENGTH = 282.7;
 const SPEED_GAUGE_MAX_MPH = 120;
+// How many g's map to the meter dot sitting right at the ring's edge.
+const G_METER_MAX_G = 0.8;
+const G_METER_RADIUS_PX = 34;
 
 // TripTracker/TripHistory work entirely in km & km/h internally (Haversine distance is
 // naturally metric) — conversion to the displayed unit happens only here, at render time.
@@ -52,6 +56,10 @@ const els = {
   gpsRetryBtn: document.getElementById('gps-retry-btn'),
   gpsDismissBtn: document.getElementById('gps-dismiss-btn'),
   lensSwitcher: document.getElementById('lens-switcher'),
+  gMeter: document.getElementById('g-meter'),
+  gMeterDot: document.getElementById('g-meter-dot'),
+  gMeterPeakDot: document.getElementById('g-meter-peak-dot'),
+  gMeterPeakValue: document.getElementById('g-meter-peak-value'),
   driveError: document.getElementById('drive-error'),
   driveErrorMessage: document.getElementById('drive-error-message'),
   driveErrorBackBtn: document.getElementById('drive-error-back-btn'),
@@ -66,6 +74,8 @@ const els = {
   summaryOvertaken: document.getElementById('summary-overtaken'),
   summaryNetMessage: document.getElementById('summary-net-message'),
   summarySaveBtn: document.getElementById('summary-save-btn'),
+  summaryPeakGCard: document.getElementById('summary-peak-g-card'),
+  summaryPeakG: document.getElementById('summary-peak-g'),
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +100,8 @@ const state = {
   gpsFixAcquired: false,
   activeLensDeviceId: null,
   lensByDeviceId: null,
+  motionTracker: null,
+  lastPeakG: 0,
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -255,6 +267,7 @@ function buildTripCard(trip) {
       <div><div class="val">${formatDurationLong(trip.durationSec || 0)}</div><div class="lbl">duration</div></div>
       <div><div class="val">${Math.round(kmhToMph(trip.avgSpeedKmh || 0))}</div><div class="lbl">avg mph</div></div>
       <div><div class="val">${Math.round(kmhToMph(trip.topSpeedKmh || 0))}</div><div class="lbl">top mph</div></div>
+      ${typeof trip.peakG === 'number' ? `<div><div class="val">${trip.peakG.toFixed(1)}</div><div class="lbl">peak g</div></div>` : ''}
     </div>
     <button class="trip-card-delete" type="button">Delete trip</button>
   `;
@@ -330,6 +343,14 @@ async function startDrive() {
   els.liveSpeed.textContent = '0';
   els.liveTimer.textContent = '00:00';
   updateSpeedGauge(0);
+  resetGMeter();
+
+  // Requested first and not awaited-around before other permission prompts: iOS only grants
+  // this from a call made directly inside the click that's still active right now, and
+  // getUserMedia below can itself take a moment in a way that risks losing that window.
+  const motionPermissionPromise = MotionTracker.isSupported()
+    ? MotionTracker.requestPermission()
+    : Promise.resolve(false);
 
   let stream;
   try {
@@ -416,7 +437,43 @@ async function startDrive() {
     els.liveTimer.textContent = formatDuration(elapsed);
   }, 1000);
 
+  motionPermissionPromise.then((granted) => {
+    if (!granted) return; // denied, unsupported, or this browser has no permission concept and just works — either way nothing to show if it's not granted
+    state.motionTracker = new MotionTracker();
+    state.motionTracker.onUpdate((motionStats) => updateGMeter(motionStats));
+    state.motionTracker.start();
+    els.gMeter.classList.remove('hidden');
+  });
+
   startDrawLoop();
+}
+
+function resetGMeter() {
+  state.lastPeakG = 0;
+  els.gMeterDot.style.transform = 'translate(-50%, -50%)';
+  els.gMeterPeakDot.style.transform = 'translate(-50%, -50%)';
+  els.gMeterPeakValue.textContent = '0.0';
+  els.gMeter.classList.add('hidden');
+}
+
+function gOffsetPx(value) {
+  const clamped = Math.max(-G_METER_MAX_G, Math.min(G_METER_MAX_G, value || 0));
+  return (clamped / G_METER_MAX_G) * G_METER_RADIUS_PX;
+}
+
+function updateGMeter(motionStats) {
+  // Screen x maps to the device's x-axis; y is inverted since a forward pitch (device y-axis)
+  // should read as a downward dot movement on screen, matching how these meters conventionally
+  // read (visually "forward" force pushes the dot toward the bottom of the display).
+  const dotX = gOffsetPx(motionStats.ax);
+  const dotY = gOffsetPx(-motionStats.ay);
+  els.gMeterDot.style.transform = `translate(calc(-50% + ${dotX}px), calc(-50% + ${dotY}px))`;
+
+  state.lastPeakG = motionStats.peakG;
+  const peakX = gOffsetPx(motionStats.peakAx);
+  const peakY = gOffsetPx(-motionStats.peakAy);
+  els.gMeterPeakDot.style.transform = `translate(calc(-50% + ${peakX}px), calc(-50% + ${peakY}px))`;
+  els.gMeterPeakValue.textContent = motionStats.peakG.toFixed(1);
 }
 
 function resizeCanvasToVideo() {
@@ -682,6 +739,13 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   state.activeLensDeviceId = null;
   state.lensByDeviceId = null;
 
+  let peakG = null;
+  if (state.motionTracker) {
+    peakG = state.motionTracker.stop().peakG;
+    state.motionTracker = null;
+  }
+  resetGMeter();
+
   let summary = null;
   if (state.tripTracker) {
     summary = state.tripTracker.stop();
@@ -694,7 +758,7 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   }
 
   if (showSummary && summary) {
-    presentSummary(summary);
+    presentSummary(summary, peakG);
   }
 }
 
@@ -706,7 +770,7 @@ function netScoreMessage(net) {
   return `Net ${net}. Rough one — the highway had other plans. 🫠`;
 }
 
-function presentSummary(summary) {
+function presentSummary(summary, peakG) {
   const net = state.overtakesByMe - state.overtakesOfMe;
 
   state.lastSummary = {
@@ -718,6 +782,10 @@ function presentSummary(summary) {
     topSpeedKmh: Math.max(summary.topSpeedKmh, state.liveTopSpeedKmh),
     overtakesByMe: state.overtakesByMe,
     overtakesOfMe: state.overtakesOfMe,
+    // null (not 0) when motion permission was denied/unsupported — a real 0.0g reading and
+    // "we never measured this" are different things, and trip cards/history should be able
+    // to tell them apart rather than showing a misleadingly precise zero.
+    peakG: typeof peakG === 'number' ? peakG : null,
   };
 
   els.summaryDistance.innerHTML = `${round1(kmToMi(summary.distanceKm))}<span class="stat-unit">mi</span>`;
@@ -727,6 +795,13 @@ function presentSummary(summary) {
   els.summaryOvertook.textContent = String(state.overtakesByMe);
   els.summaryOvertaken.textContent = String(state.overtakesOfMe);
   els.summaryNetMessage.textContent = netScoreMessage(net);
+
+  if (state.lastSummary.peakG !== null) {
+    els.summaryPeakG.innerHTML = `${state.lastSummary.peakG.toFixed(1)}<span class="stat-unit">g</span>`;
+    els.summaryPeakGCard.classList.remove('hidden');
+  } else {
+    els.summaryPeakGCard.classList.add('hidden');
+  }
 
   els.summaryModal.classList.remove('hidden');
 }
