@@ -6,6 +6,9 @@ import { TripTracker, TripHistory } from './trip.js';
 
 const ONBOARDING_KEY = 'overtaker_onboarded';
 const DETECTION_INTERVAL_MS = 200;
+// Must match the 270deg-arc stroke-dasharray/circumference set in styles.css for #speed-gauge-fill.
+const SPEED_GAUGE_ARC_LENGTH = 282.7;
+const SPEED_GAUGE_MAX_KMH = 180;
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -29,6 +32,7 @@ const els = {
   overlayCanvas: document.getElementById('overlay-canvas'),
   liveSpeed: document.getElementById('live-speed'),
   liveTimer: document.getElementById('live-timer'),
+  speedGaugeFill: document.getElementById('speed-gauge-fill'),
   countOvertook: document.getElementById('count-overtook'),
   countOvertaken: document.getElementById('count-overtaken'),
   countOvertookPill: document.getElementById('count-overtook-pill'),
@@ -79,6 +83,7 @@ const state = {
   resizeObserver: null,
   gpsFixAcquired: false,
   activeLensDeviceId: null,
+  lensByDeviceId: null,
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -165,6 +170,11 @@ function formatDate(timestamp) {
 
 function round1(n) {
   return Math.round((n + Number.EPSILON) * 10) / 10;
+}
+
+function updateSpeedGauge(speedKmh) {
+  const fraction = Math.max(0, Math.min(1, (speedKmh || 0) / SPEED_GAUGE_MAX_KMH));
+  els.speedGaugeFill.style.strokeDashoffset = String(SPEED_GAUGE_ARC_LENGTH * (1 - fraction));
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +323,7 @@ async function startDrive() {
   els.countOvertaken.textContent = '0';
   els.liveSpeed.textContent = '0';
   els.liveTimer.textContent = '00:00';
+  updateSpeedGauge(0);
 
   let stream;
   try {
@@ -376,6 +387,7 @@ async function startDrive() {
       hideGpsPermissionHelp();
     }
     els.liveSpeed.textContent = String(Math.round(liveStats.speedKmh || 0));
+    updateSpeedGauge(liveStats.speedKmh);
     state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
   });
   state.tripTracker.onError((reason) => {
@@ -431,6 +443,7 @@ async function setupLensSwitcher(currentStream) {
   const lenses = backCameras
     .map((d) => ({ deviceId: d.deviceId, ...classify(d.label) }))
     .sort((a, b) => a.order - b.order);
+  state.lensByDeviceId = new Map(lenses.map((lens) => [lens.deviceId, lens]));
 
   for (const lens of lenses) {
     const btn = document.createElement('button');
@@ -443,6 +456,13 @@ async function setupLensSwitcher(currentStream) {
   }
 
   els.lensSwitcher.classList.remove('hidden');
+  applyTileCountForLens(currentDeviceId);
+}
+
+function applyTileCountForLens(deviceId) {
+  const lens = state.lensByDeviceId?.get(deviceId);
+  const isUltraWide = lens?.order === 0;
+  state.carTracker?.setTileCount(isUltraWide ? 2 : 1);
 }
 
 async function switchLens(deviceId) {
@@ -465,6 +485,7 @@ async function switchLens(deviceId) {
   state.mediaStream = newStream;
   els.cameraVideo.srcObject = newStream;
   state.activeLensDeviceId = deviceId;
+  applyTileCountForLens(deviceId);
 
   for (const btn of els.lensSwitcher.children) {
     btn.classList.toggle('active', btn.dataset.deviceId === deviceId);
@@ -519,6 +540,61 @@ function handleOvertakeEvent(event) {
   }
 }
 
+// Manual implementation instead of the native ctx.roundRect() — that's only supported on
+// fairly recent browsers, and this canvas has to work across whatever phone is testing it.
+function tracePath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+// Draws HUD-style targeting brackets (like a camera autofocus reticle) at each corner of a
+// box instead of a plain rectangle — reads as a live tracking system, not a debug outline.
+function drawHudBox(ctx, x, y, w, h, label) {
+  const cornerLen = Math.max(10, Math.min(w, h) * 0.28);
+
+  ctx.beginPath();
+  ctx.moveTo(x, y + cornerLen);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + cornerLen, y);
+
+  ctx.moveTo(x + w - cornerLen, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + cornerLen);
+
+  ctx.moveTo(x + w, y + h - cornerLen);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + w - cornerLen, y + h);
+
+  ctx.moveTo(x + cornerLen, y + h);
+  ctx.lineTo(x, y + h);
+  ctx.lineTo(x, y + h - cornerLen);
+  ctx.stroke();
+
+  const text = label || 'vehicle';
+  ctx.font = '600 11px "Rajdhani", sans-serif';
+  const textWidth = ctx.measureText(text).width;
+  const chipW = textWidth + 14;
+  const chipH = 18;
+  const chipX = x;
+  const chipY = y - chipH - 4 < 0 ? y + h + 4 : y - chipH - 4;
+
+  ctx.fillStyle = 'rgba(0, 217, 255, 0.16)';
+  tracePath(ctx, chipX, chipY, chipW, chipH, 5);
+  ctx.fill();
+
+  ctx.fillStyle = '#c9f7ff';
+  ctx.fillText(text, chipX + 7, chipY + 13);
+}
+
 function startDrawLoop() {
   const ctx = els.overlayCanvas.getContext('2d');
 
@@ -539,18 +615,22 @@ function startDrawLoop() {
 
       ctx.lineWidth = 2.5;
       ctx.strokeStyle = '#00d9ff';
-      ctx.font = '12px sans-serif';
-      ctx.fillStyle = '#00d9ff';
+      ctx.shadowColor = 'rgba(0, 217, 255, 0.65)';
+      ctx.shadowBlur = 6;
 
       for (const track of state.latestTracks) {
         const [x, y, w, h] = track.bbox;
-        const canvasX = x * scale + offsetX;
-        const canvasY = y * scale + offsetY;
-        const canvasW = w * scale;
-        const canvasH = h * scale;
-        ctx.strokeRect(canvasX, canvasY, canvasW, canvasH);
-        ctx.fillText(track.class || 'vehicle', canvasX + 4, canvasY - 6 < 0 ? canvasY + 14 : canvasY - 6);
+        drawHudBox(
+          ctx,
+          x * scale + offsetX,
+          y * scale + offsetY,
+          w * scale,
+          h * scale,
+          track.class
+        );
       }
+
+      ctx.shadowBlur = 0;
     }
 
     state.rafId = requestAnimationFrame(draw);
@@ -591,6 +671,7 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   els.lensSwitcher.classList.add('hidden');
   els.lensSwitcher.innerHTML = '';
   state.activeLensDeviceId = null;
+  state.lensByDeviceId = null;
 
   let summary = null;
   if (state.tripTracker) {
