@@ -8,7 +8,13 @@ const ONBOARDING_KEY = 'overtaker_onboarded';
 const DETECTION_INTERVAL_MS = 200;
 // Must match the 270deg-arc stroke-dasharray/circumference set in styles.css for #speed-gauge-fill.
 const SPEED_GAUGE_ARC_LENGTH = 282.7;
-const SPEED_GAUGE_MAX_KMH = 180;
+const SPEED_GAUGE_MAX_MPH = 120;
+
+// TripTracker/TripHistory work entirely in km & km/h internally (Haversine distance is
+// naturally metric) — conversion to the displayed unit happens only here, at render time.
+const KM_TO_MI = 0.621371;
+const kmToMi = (km) => (km || 0) * KM_TO_MI;
+const kmhToMph = (kmh) => (kmh || 0) * KM_TO_MI;
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -172,8 +178,8 @@ function round1(n) {
   return Math.round((n + Number.EPSILON) * 10) / 10;
 }
 
-function updateSpeedGauge(speedKmh) {
-  const fraction = Math.max(0, Math.min(1, (speedKmh || 0) / SPEED_GAUGE_MAX_KMH));
+function updateSpeedGauge(speedMph) {
+  const fraction = Math.max(0, Math.min(1, (speedMph || 0) / SPEED_GAUGE_MAX_MPH));
   els.speedGaugeFill.style.strokeDashoffset = String(SPEED_GAUGE_ARC_LENGTH * (1 - fraction));
 }
 
@@ -210,10 +216,10 @@ async function renderDashboard() {
   ]);
 
   els.statTotalTrips.textContent = String(aggregate.totalTrips);
-  els.statTotalDistance.innerHTML = `${round1(aggregate.totalDistanceKm)}<span class="stat-unit">km</span>`;
+  els.statTotalDistance.innerHTML = `${round1(kmToMi(aggregate.totalDistanceKm))}<span class="stat-unit">mi</span>`;
   els.statNetScore.textContent =
     aggregate.netScore > 0 ? `+${aggregate.netScore}` : String(aggregate.netScore);
-  els.statBestSpeed.innerHTML = `${Math.round(aggregate.bestTopSpeedKmh)}<span class="stat-unit">km/h</span>`;
+  els.statBestSpeed.innerHTML = `${Math.round(kmhToMph(aggregate.bestTopSpeedKmh))}<span class="stat-unit">mph</span>`;
 
   els.tripHistoryCount.textContent = trips.length ? `${trips.length} drive${trips.length === 1 ? '' : 's'}` : '';
 
@@ -245,10 +251,10 @@ function buildTripCard(trip) {
       <div class="trip-card-net ${netClass}">${netLabel} net</div>
     </div>
     <div class="trip-card-stats">
-      <div><div class="val">${round1(trip.distanceKm || 0)}</div><div class="lbl">km</div></div>
+      <div><div class="val">${round1(kmToMi(trip.distanceKm || 0))}</div><div class="lbl">mi</div></div>
       <div><div class="val">${formatDurationLong(trip.durationSec || 0)}</div><div class="lbl">duration</div></div>
-      <div><div class="val">${Math.round(trip.avgSpeedKmh || 0)}</div><div class="lbl">avg km/h</div></div>
-      <div><div class="val">${Math.round(trip.topSpeedKmh || 0)}</div><div class="lbl">top km/h</div></div>
+      <div><div class="val">${Math.round(kmhToMph(trip.avgSpeedKmh || 0))}</div><div class="lbl">avg mph</div></div>
+      <div><div class="val">${Math.round(kmhToMph(trip.topSpeedKmh || 0))}</div><div class="lbl">top mph</div></div>
     </div>
     <button class="trip-card-delete" type="button">Delete trip</button>
   `;
@@ -386,8 +392,11 @@ async function startDrive() {
       els.gpsStatusBadge.classList.add('hidden');
       hideGpsPermissionHelp();
     }
-    els.liveSpeed.textContent = String(Math.round(liveStats.speedKmh || 0));
-    updateSpeedGauge(liveStats.speedKmh);
+    const speedMph = kmhToMph(liveStats.speedKmh);
+    els.liveSpeed.textContent = String(Math.round(speedMph));
+    updateSpeedGauge(speedMph);
+    // Stays in km/h internally to match summary.topSpeedKmh from TripTracker.stop(), which
+    // this gets merged with in presentSummary() — converted to mph only at render time there.
     state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
   });
   state.tripTracker.onError((reason) => {
@@ -711,10 +720,10 @@ function presentSummary(summary) {
     overtakesOfMe: state.overtakesOfMe,
   };
 
-  els.summaryDistance.innerHTML = `${round1(summary.distanceKm)}<span class="stat-unit">km</span>`;
+  els.summaryDistance.innerHTML = `${round1(kmToMi(summary.distanceKm))}<span class="stat-unit">mi</span>`;
   els.summaryDuration.textContent = formatDuration(summary.durationSec);
-  els.summaryAvgSpeed.innerHTML = `${Math.round(summary.avgSpeedKmh)}<span class="stat-unit">km/h</span>`;
-  els.summaryTopSpeed.innerHTML = `${Math.round(state.lastSummary.topSpeedKmh)}<span class="stat-unit">km/h</span>`;
+  els.summaryAvgSpeed.innerHTML = `${Math.round(kmhToMph(summary.avgSpeedKmh))}<span class="stat-unit">mph</span>`;
+  els.summaryTopSpeed.innerHTML = `${Math.round(kmhToMph(state.lastSummary.topSpeedKmh))}<span class="stat-unit">mph</span>`;
   els.summaryOvertook.textContent = String(state.overtakesByMe);
   els.summaryOvertaken.textContent = String(state.overtakesOfMe);
   els.summaryNetMessage.textContent = netScoreMessage(net);
