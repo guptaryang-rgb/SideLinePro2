@@ -725,6 +725,25 @@ body {
   margin: 0 0 22px;
 }
 
+.gps-permission-steps {
+  text-align: left;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 0 22px;
+  padding-left: 22px;
+}
+
+.gps-permission-steps li {
+  margin-bottom: 6px;
+}
+
+.gps-permission-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 /* ---- Toasts ---- */
 
 #event-toast-container {
