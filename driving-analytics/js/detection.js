@@ -24,6 +24,12 @@ const DEFAULT_OPTS = {
 // are almost certainly the same vehicle seen twice, not two vehicles.
 const TILE_DEDUPE_IOU = 0.4;
 
+// Below this estimated absolute speed, a "vehicle" is effectively not moving — a parked car,
+// one waiting at a light or stop sign, etc. We trivially "close the gap" on anything stationary
+// just by driving past it, which produced false "overtook" events for every parked/stopped car
+// along the road. Real traffic overtakes involve an actually-moving vehicle.
+const STATIONARY_SPEED_MPS = 2.5; // ~5.6 mph
+
 // Assumed real-world vehicle widths (meters), used only to turn a bounding box's pixel width
 // into a rough estimated distance via a pinhole-camera projection. There's no per-device
 // camera calibration here, so treat every distance/speed number this produces as a ballpark
@@ -130,6 +136,19 @@ export class CarTracker {
     this.tileCount = Math.max(1, Math.min(3, Math.round(n)));
   }
 
+  // Running the model N times per tick (once per tile) instead of once directly lowers the
+  // effective detection rate by roughly that factor — a car can then move further between
+  // successful detections than a fixed matching tolerance allows, fragmenting one real track
+  // into several short ones that each get dropped before a pass event can even fire. This is
+  // what "struggled to maintain tracking at 0.5x" actually was. Widen the tolerance to match.
+  // Trade-off: the nearest-centroid fallback below is greedy, not a global optimum, so a wider
+  // radius also raises the odds of latching onto a different nearby vehicle in dense traffic
+  // (an identity swap) — an inherent cost of this fix, not a bug, but worth knowing about if
+  // 0.5x tracking still misbehaves after this.
+  setMatchDistanceRatio(ratio) {
+    this.opts.matchDistanceRatio = ratio;
+  }
+
   async detectVehicles(videoEl) {
     if (!this.ready) return [];
     if (this.tileCount <= 1) {
@@ -155,19 +174,32 @@ export class CarTracker {
       this._tileCtx = this._tileCanvas.getContext('2d');
     }
 
-    // Each tile covers a bit more than half the frame so a vehicle straddling the seam still
-    // lands fully inside at least one tile; overlapping detections get de-duped below.
-    const tileW = Math.round(vw * 0.58);
-    const tileOffsets = [0, vw - tileW];
-    this._tileCanvas.width = tileW;
-    this._tileCanvas.height = vh;
+    // Each tile crops a bit more than half the frame's width so a vehicle straddling the seam
+    // still lands fully inside at least one tile (overlapping detections get de-duped below).
+    // That crop is then drawn into a canvas capped at a modest resolution — the model resizes
+    // its input down internally regardless, so handing it a smaller image costs nothing in
+    // detection quality but meaningfully cuts per-tile decode/inference time, which matters
+    // because two tiles run sequentially every tick (see setMatchDistanceRatio for why that
+    // matters for tracking). Detections are scaled back up to full-frame pixel coordinates.
+    const cropW = Math.round(vw * 0.6);
+    const maxCanvasW = 640;
+    const canvasW = Math.min(cropW, maxCanvasW);
+    const canvasH = Math.round(vh * (canvasW / cropW));
+    const scaleToFullRes = cropW / canvasW;
+    const tileOffsets = [0, vw - cropW];
+    this._tileCanvas.width = canvasW;
+    this._tileCanvas.height = canvasH;
 
     const all = [];
     for (const offsetX of tileOffsets) {
-      this._tileCtx.drawImage(videoEl, offsetX, 0, tileW, vh, 0, 0, tileW, vh);
+      this._tileCtx.drawImage(videoEl, offsetX, 0, cropW, vh, 0, 0, canvasW, canvasH);
       const preds = await this.model.detect(this._tileCanvas);
       for (const p of this._filterVehicles(preds)) {
-        all.push({ ...p, bbox: [p.bbox[0] + offsetX, p.bbox[1], p.bbox[2], p.bbox[3]] });
+        const [bx, by, bw, bh] = p.bbox;
+        all.push({
+          ...p,
+          bbox: [bx * scaleToFullRes + offsetX, by * scaleToFullRes, bw * scaleToFullRes, bh * scaleToFullRes],
+        });
       }
     }
     return this._dedupeOverlaps(all);
@@ -318,11 +350,19 @@ export class CarTracker {
     if (closingRateMps > 0 && endOffset > startOffset) {
       // We were closing the gap overall, and it ended up more off-center than it started —
       // consistent with catching up to and passing it.
+      const theirSpeedMps = hasOurSpeed ? Math.max(0, ourSpeedMps - closingRateMps) : null;
+
+      // Trivially true for ANY stationary object we drive past (a parked car, one waiting at a
+      // light) — that's not "overtaking" in the traffic sense, so only count it once we have a
+      // speed estimate and it's clearly above walking-pace. Without a speed estimate (GPS not
+      // yet acquired) we can't tell the difference, so it still passes through as before.
+      if (hasOurSpeed && theirSpeedMps < STATIONARY_SPEED_MPS) return null;
+
       return {
         type: 'overtook',
         id: track.id,
         timestamp: Date.now(),
-        theirSpeedMps: hasOurSpeed ? Math.max(0, ourSpeedMps - closingRateMps) : null,
+        theirSpeedMps,
       };
     }
 

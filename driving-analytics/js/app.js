@@ -34,7 +34,7 @@ const els = {
   tripDetailBackBtn: document.getElementById('trip-detail-back-btn'),
   tripDetailDate: document.getElementById('trip-detail-date'),
   tripDetailStats: document.getElementById('trip-detail-stats'),
-  routeCanvas: document.getElementById('route-canvas'),
+  routeMapContainer: document.getElementById('route-map'),
   startDriveBtn: document.getElementById('start-drive-btn'),
   statTotalTrips: document.getElementById('stat-total-trips'),
   statTotalDistance: document.getElementById('stat-total-distance'),
@@ -110,6 +110,8 @@ const state = {
   lastPeakG: 0,
   currentSpeedKmh: 0,
   driveEvents: [],
+  routeMap: null,
+  routeMapLayerGroup: null,
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -311,85 +313,73 @@ function showTripDetail(trip) {
     <div class="stat-card"><div class="stat-label">Top speed</div><div class="stat-value">${Math.round(kmhToMph(trip.topSpeedKmh || 0))}<span class="stat-unit">mph</span></div></div>
   `;
 
-  // Sized here (rather than in CSS) so the backing store matches the actual rendered box for
-  // a crisp draw — the aspect-ratio: 1/1 CSS rule determines the box, this just matches it.
-  const rect = els.routeCanvas.getBoundingClientRect();
-  els.routeCanvas.width = Math.round(rect.width);
-  els.routeCanvas.height = Math.round(rect.height);
-  drawRouteCanvas(els.routeCanvas, trip.route, trip.events);
+  initRouteMapIfNeeded();
+  renderRouteOnMap(trip);
+  // The map container was hidden (display:none) until showView() ran above, and Leaflet sizes
+  // its tile grid from the container's dimensions at the moment it's told to — a map created or
+  // updated while still hidden ends up with a wrong/zero size and renders blank or torn until
+  // manually nudged. Deferred one tick so the browser has actually applied the layout change.
+  setTimeout(() => state.routeMap && state.routeMap.invalidateSize(), 0);
 }
 
-// Renders a trip's GPS route as a simple sketch — no map tiles or API key, just the shape of
-// the path plus start/end and overtake-event markers, normalized to fit the canvas. Longitude
-// degrees compress with latitude, so lng deltas are scaled by cos(avg latitude) to avoid a
-// visibly stretched/squashed route shape.
-function drawRouteCanvas(canvas, route, events) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width;
-  const h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
+// Real map tiles (free CARTO "Dark Matter" basemap — no API key required) rather than a hand-
+// drawn sketch, so the route is recognizable against actual streets. One Leaflet map instance
+// is created lazily and reused across trips (Leaflet errors if you re-initialize a map on the
+// same container twice); a dedicated layer group is cleared and rebuilt for each trip viewed.
+function initRouteMapIfNeeded() {
+  if (state.routeMap || typeof L === 'undefined') return;
+  state.routeMap = L.map(els.routeMapContainer, {
+    zoomControl: true,
+    attributionControl: true,
+  }).setView([0, 0], 2);
 
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 20,
+  }).addTo(state.routeMap);
+
+  state.routeMapLayerGroup = L.layerGroup().addTo(state.routeMap);
+}
+
+function renderRouteOnMap(trip) {
+  const map = state.routeMap;
+  if (!map) {
+    // Leaflet didn't load (offline, blocked CDN, etc.) — fail visibly but gracefully rather
+    // than throwing on the undefined global, same pattern as every other optional feature here.
+    els.routeMapContainer.textContent = 'Map unavailable — check your connection and reload.';
+    return;
+  }
+  const layerGroup = state.routeMapLayerGroup;
+  layerGroup.clearLayers();
+
+  const route = trip.route;
   if (!route || route.length < 2) {
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-    ctx.font = '14px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('No route data for this drive', w / 2, h / 2);
-    ctx.textAlign = 'left';
+    map.setView([0, 0], 2);
     return;
   }
 
-  const lats = route.map((p) => p.lat);
-  const lngs = route.map((p) => p.lng);
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs);
-  const maxLng = Math.max(...lngs);
-  const lngScale = Math.cos(((minLat + maxLat) / 2) * (Math.PI / 180)) || 1;
+  const latLngs = route.map((p) => [p.lat, p.lng]);
+  L.polyline(latLngs, { color: '#00d9ff', weight: 4, opacity: 0.9, lineJoin: 'round' }).addTo(layerGroup);
 
-  const padding = 24;
-  const spanLat = Math.max(maxLat - minLat, 0.00001);
-  const spanLng = Math.max((maxLng - minLng) * lngScale, 0.00001);
-  const scale = Math.min((w - 2 * padding) / spanLng, (h - 2 * padding) / spanLat);
-  const drawnW = spanLng * scale;
-  const drawnH = spanLat * scale;
-  const offsetX = (w - drawnW) / 2;
-  const offsetY = (h - drawnH) / 2;
+  const marker = (lat, lng, color, radius) =>
+    L.circleMarker([lat, lng], {
+      radius,
+      color: 'rgba(5, 7, 11, 0.6)',
+      weight: 1.5,
+      fillColor: color,
+      fillOpacity: 1,
+    }).addTo(layerGroup);
 
-  const project = (lat, lng) => [
-    offsetX + (lng - minLng) * lngScale * scale,
-    h - offsetY - (lat - minLat) * scale, // flip so higher latitude (north) draws toward the top
-  ];
+  marker(route[0].lat, route[0].lng, '#39ff9d', 7);
+  marker(route[route.length - 1].lat, route[route.length - 1].lng, '#8b93a7', 7);
 
-  ctx.strokeStyle = '#00d9ff';
-  ctx.lineWidth = 3;
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  route.forEach((p, i) => {
-    const [x, y] = project(p.lat, p.lng);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  const drawDot = (lat, lng, color, radius) => {
-    const [x, y] = project(lat, lng);
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(5, 7, 11, 0.6)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  };
-
-  drawDot(route[0].lat, route[0].lng, '#39ff9d', 6);
-  drawDot(route[route.length - 1].lat, route[route.length - 1].lng, '#8b93a7', 6);
-
-  for (const ev of events || []) {
+  for (const ev of trip.events || []) {
     if (typeof ev.lat !== 'number' || typeof ev.lng !== 'number') continue;
-    drawDot(ev.lat, ev.lng, ev.type === 'overtook' ? '#4ade80' : '#ff5470', 5);
+    marker(ev.lat, ev.lng, ev.type === 'overtook' ? '#4ade80' : '#ff5470', 6);
   }
+
+  map.fitBounds(L.latLngBounds(latLngs), { padding: [24, 24] });
 }
 
 // ---------------------------------------------------------------------------
@@ -639,12 +629,18 @@ async function setupLensSwitcher(currentStream) {
 // this feeds the tracker's pixel-width-to-distance estimate, which is FOV-dependent.
 const ULTRA_WIDE_HFOV_DEG = 102;
 const MAIN_LENS_HFOV_DEG = 68;
+// Tiled detection (used on the ultra-wide lens) runs the model twice per tick instead of once,
+// lowering the effective detection rate — widen the tracker's frame-to-frame matching tolerance
+// to compensate, or a fast-moving car can outrun it and fragment into several lost tracks.
+const ULTRA_WIDE_MATCH_DISTANCE_RATIO = 0.28;
+const MAIN_LENS_MATCH_DISTANCE_RATIO = 0.15;
 
 function applyTileCountForLens(deviceId) {
   const lens = state.lensByDeviceId?.get(deviceId);
   const isUltraWide = lens?.order === 0;
   state.carTracker?.setTileCount(isUltraWide ? 2 : 1);
   state.carTracker?.setHorizontalFovDeg(isUltraWide ? ULTRA_WIDE_HFOV_DEG : MAIN_LENS_HFOV_DEG);
+  state.carTracker?.setMatchDistanceRatio(isUltraWide ? ULTRA_WIDE_MATCH_DISTANCE_RATIO : MAIN_LENS_MATCH_DISTANCE_RATIO);
 }
 
 async function switchLens(deviceId) {

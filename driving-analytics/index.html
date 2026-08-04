@@ -14,6 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -203,7 +204,7 @@
     </header>
 
     <div class="route-map-wrap">
-      <canvas id="route-canvas"></canvas>
+      <div id="route-map"></div>
     </div>
 
     <div class="route-legend">
@@ -262,9 +263,10 @@
     </div>
   </div>
 
-  <!-- TensorFlow.js + coco-ssd loaded as classic globals before our module -->
+  <!-- TensorFlow.js + coco-ssd + Leaflet loaded as classic globals before our module -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
   <script type="module" src="./js/app.js"></script>
 
   <script>

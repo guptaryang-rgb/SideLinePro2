@@ -528,13 +528,35 @@ body {
   border-radius: var(--radius-lg);
   padding: 10px;
   margin-bottom: 14px;
+  overflow: hidden;
 }
 
-#route-canvas {
-  display: block;
+#route-map {
   width: 100%;
   aspect-ratio: 1 / 1;
   border-radius: var(--radius-md);
+  background: #1a1f2b;
+}
+
+/* Dark-theme overrides for Leaflet's default (light-themed) controls, so the map's chrome
+   doesn't clash with the rest of the app. */
+.leaflet-control-zoom a {
+  background: var(--bg-elevated) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background: var(--bg-card) !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(9, 12, 19, 0.72) !important;
+  color: var(--text-faint) !important;
+}
+
+.leaflet-control-attribution a {
+  color: var(--text-muted) !important;
 }
 
 .route-legend {
