@@ -37,6 +37,10 @@ const els = {
   modelLoadingBadge: document.getElementById('model-loading-badge'),
   gpsStatusBadge: document.getElementById('gps-status-badge'),
   gpsStatusText: document.getElementById('gps-status-text'),
+  gpsPermissionHelp: document.getElementById('gps-permission-help'),
+  gpsPermissionSteps: document.getElementById('gps-permission-steps'),
+  gpsRetryBtn: document.getElementById('gps-retry-btn'),
+  gpsDismissBtn: document.getElementById('gps-dismiss-btn'),
   lensSwitcher: document.getElementById('lens-switcher'),
   driveError: document.getElementById('drive-error'),
   driveErrorMessage: document.getElementById('drive-error-message'),
@@ -84,6 +88,54 @@ const GPS_ERROR_MESSAGES = {
   unsupported: "This browser doesn't support location tracking.",
   unknown: 'Waiting for GPS…',
 };
+
+// No website can silently re-grant a permission the user (or OS) has already denied — that's
+// a hard browser security boundary. The best we can do is walk them to the exact right screen.
+function detectGpsPermissionSteps() {
+  const ua = navigator.userAgent || '';
+  const isIos = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isSafari = isIos && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+  const isAndroid = /Android/.test(ua);
+  const isChrome = /Chrome/.test(ua) && !/Edg|OPR/.test(ua);
+
+  if (isIos && isSafari) {
+    return [
+      'Tap the "AA" icon at the left of the address bar',
+      'Tap "Website Settings"',
+      'Set Location to "Allow"',
+      'Reload this page',
+      "If there's no Location option there, check Settings app → Privacy & Security → Location Services → Safari Websites → \"While Using the App\"",
+    ];
+  }
+  if (isAndroid && isChrome) {
+    return [
+      'Tap the lock or info icon (🔒 / ⓘ) in the address bar',
+      'Tap "Permissions" → "Location"',
+      'Set it to "Allow"',
+      'Reload this page',
+    ];
+  }
+  return [
+    "Open your browser's site settings for this page",
+    'Find "Location" and set it to "Allow"',
+    'Reload this page',
+  ];
+}
+
+function showGpsPermissionHelp() {
+  els.gpsStatusBadge.classList.add('hidden');
+  els.gpsPermissionSteps.innerHTML = '';
+  for (const step of detectGpsPermissionSteps()) {
+    const li = document.createElement('li');
+    li.textContent = step;
+    els.gpsPermissionSteps.appendChild(li);
+  }
+  els.gpsPermissionHelp.classList.remove('hidden');
+}
+
+function hideGpsPermissionHelp() {
+  els.gpsPermissionHelp.classList.add('hidden');
+}
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -321,12 +373,17 @@ async function startDrive() {
     if (!state.gpsFixAcquired) {
       state.gpsFixAcquired = true;
       els.gpsStatusBadge.classList.add('hidden');
+      hideGpsPermissionHelp();
     }
     els.liveSpeed.textContent = String(Math.round(liveStats.speedKmh || 0));
     state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
   });
   state.tripTracker.onError((reason) => {
     if (state.gpsFixAcquired) return; // already getting fixes — a stray error isn't worth interrupting the UI for
+    if (reason === 'permission_denied') {
+      showGpsPermissionHelp();
+      return;
+    }
     els.gpsStatusText.textContent = GPS_ERROR_MESSAGES[reason] || GPS_ERROR_MESSAGES.unknown;
     els.gpsStatusBadge.classList.remove('hidden');
   });
@@ -530,6 +587,7 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   els.cameraVideo.srcObject = null;
 
   els.gpsStatusBadge.classList.add('hidden');
+  hideGpsPermissionHelp();
   els.lensSwitcher.classList.add('hidden');
   els.lensSwitcher.innerHTML = '';
   state.activeLensDeviceId = null;
@@ -618,6 +676,19 @@ function init() {
     stopDrive({ showSummary: false });
     els.driveError.classList.add('hidden');
     showView('dashboard');
+  });
+
+  els.gpsRetryBtn.addEventListener('click', () => {
+    hideGpsPermissionHelp();
+    // Safe to fully reset here: reaching this UI means no fix has ever landed yet this
+    // drive (state.gpsFixAcquired is still false), so there's no accumulated distance to lose.
+    els.gpsStatusText.textContent = GPS_ERROR_MESSAGES.unknown;
+    els.gpsStatusBadge.classList.remove('hidden');
+    state.tripTracker.start();
+  });
+
+  els.gpsDismissBtn.addEventListener('click', () => {
+    hideGpsPermissionHelp();
   });
 
   els.summarySaveBtn.addEventListener('click', () => {
