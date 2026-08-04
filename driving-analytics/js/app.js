@@ -19,6 +19,7 @@ const G_METER_RADIUS_PX = 34;
 const KM_TO_MI = 0.621371;
 const kmToMi = (km) => (km || 0) * KM_TO_MI;
 const kmhToMph = (kmh) => (kmh || 0) * KM_TO_MI;
+const mpsToMph = (mps) => (mps || 0) * 2.23694;
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -29,6 +30,11 @@ const els = {
   onboardingContinueBtn: document.getElementById('onboarding-continue-btn'),
 
   viewDashboard: document.getElementById('view-dashboard'),
+  viewTripDetail: document.getElementById('view-trip-detail'),
+  tripDetailBackBtn: document.getElementById('trip-detail-back-btn'),
+  tripDetailDate: document.getElementById('trip-detail-date'),
+  tripDetailStats: document.getElementById('trip-detail-stats'),
+  routeCanvas: document.getElementById('route-canvas'),
   startDriveBtn: document.getElementById('start-drive-btn'),
   statTotalTrips: document.getElementById('stat-total-trips'),
   statTotalDistance: document.getElementById('stat-total-distance'),
@@ -102,6 +108,8 @@ const state = {
   lensByDeviceId: null,
   motionTracker: null,
   lastPeakG: 0,
+  currentSpeedKmh: 0,
+  driveEvents: [],
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -273,7 +281,8 @@ function buildTripCard(trip) {
   `;
 
   const deleteBtn = card.querySelector('.trip-card-delete');
-  deleteBtn.addEventListener('click', async () => {
+  deleteBtn.addEventListener('click', async (e) => {
+    e.stopPropagation(); // don't also trigger the card's own click-through-to-detail handler
     try {
       await TripHistory.deleteTrip(trip.id);
     } catch (err) {
@@ -282,7 +291,105 @@ function buildTripCard(trip) {
     renderDashboard();
   });
 
+  card.addEventListener('click', () => showTripDetail(trip));
+
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// Trip detail / route replay
+// ---------------------------------------------------------------------------
+
+function showTripDetail(trip) {
+  showView('trip-detail');
+  els.tripDetailDate.textContent = formatDate(trip.startedAt);
+
+  els.tripDetailStats.innerHTML = `
+    <div class="stat-card"><div class="stat-label">Distance</div><div class="stat-value">${round1(kmToMi(trip.distanceKm || 0))}<span class="stat-unit">mi</span></div></div>
+    <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${formatDurationLong(trip.durationSec || 0)}</div></div>
+    <div class="stat-card"><div class="stat-label">Avg speed</div><div class="stat-value">${Math.round(kmhToMph(trip.avgSpeedKmh || 0))}<span class="stat-unit">mph</span></div></div>
+    <div class="stat-card"><div class="stat-label">Top speed</div><div class="stat-value">${Math.round(kmhToMph(trip.topSpeedKmh || 0))}<span class="stat-unit">mph</span></div></div>
+  `;
+
+  // Sized here (rather than in CSS) so the backing store matches the actual rendered box for
+  // a crisp draw — the aspect-ratio: 1/1 CSS rule determines the box, this just matches it.
+  const rect = els.routeCanvas.getBoundingClientRect();
+  els.routeCanvas.width = Math.round(rect.width);
+  els.routeCanvas.height = Math.round(rect.height);
+  drawRouteCanvas(els.routeCanvas, trip.route, trip.events);
+}
+
+// Renders a trip's GPS route as a simple sketch — no map tiles or API key, just the shape of
+// the path plus start/end and overtake-event markers, normalized to fit the canvas. Longitude
+// degrees compress with latitude, so lng deltas are scaled by cos(avg latitude) to avoid a
+// visibly stretched/squashed route shape.
+function drawRouteCanvas(canvas, route, events) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!route || route.length < 2) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No route data for this drive', w / 2, h / 2);
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  const lats = route.map((p) => p.lat);
+  const lngs = route.map((p) => p.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const lngScale = Math.cos(((minLat + maxLat) / 2) * (Math.PI / 180)) || 1;
+
+  const padding = 24;
+  const spanLat = Math.max(maxLat - minLat, 0.00001);
+  const spanLng = Math.max((maxLng - minLng) * lngScale, 0.00001);
+  const scale = Math.min((w - 2 * padding) / spanLng, (h - 2 * padding) / spanLat);
+  const drawnW = spanLng * scale;
+  const drawnH = spanLat * scale;
+  const offsetX = (w - drawnW) / 2;
+  const offsetY = (h - drawnH) / 2;
+
+  const project = (lat, lng) => [
+    offsetX + (lng - minLng) * lngScale * scale,
+    h - offsetY - (lat - minLat) * scale, // flip so higher latitude (north) draws toward the top
+  ];
+
+  ctx.strokeStyle = '#00d9ff';
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  route.forEach((p, i) => {
+    const [x, y] = project(p.lat, p.lng);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  const drawDot = (lat, lng, color, radius) => {
+    const [x, y] = project(lat, lng);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(5, 7, 11, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  };
+
+  drawDot(route[0].lat, route[0].lng, '#39ff9d', 6);
+  drawDot(route[route.length - 1].lat, route[route.length - 1].lng, '#8b93a7', 6);
+
+  for (const ev of events || []) {
+    if (typeof ev.lat !== 'number' || typeof ev.lng !== 'number') continue;
+    drawDot(ev.lat, ev.lng, ev.type === 'overtook' ? '#4ade80' : '#ff5470', 5);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +399,7 @@ function buildTripCard(trip) {
 function showView(view) {
   els.viewDashboard.classList.toggle('hidden', view !== 'dashboard');
   els.viewDrive.classList.toggle('hidden', view !== 'drive');
+  els.viewTripDetail.classList.toggle('hidden', view !== 'trip-detail');
 }
 
 // ---------------------------------------------------------------------------
@@ -303,13 +411,13 @@ const TOAST_COPY = {
   overtaken: ['A car overtook you 💨', 'Someone just blew by 😅', 'Getting passed happens 💨'],
 };
 
-function showToast(type) {
+function showToast(type, detail) {
   const messages = TOAST_COPY[type] || [];
   const message = messages[Math.floor(Math.random() * messages.length)] || '';
 
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.textContent = message;
+  toast.textContent = detail ? `${message} (${detail})` : message;
   els.toastContainer.appendChild(toast);
 
   setTimeout(() => {
@@ -338,6 +446,7 @@ async function startDrive() {
   state.overtakesOfMe = 0;
   state.latestTracks = [];
   state.liveTopSpeedKmh = 0;
+  state.driveEvents = [];
   els.countOvertook.textContent = '0';
   els.countOvertaken.textContent = '0';
   els.liveSpeed.textContent = '0';
@@ -419,6 +528,7 @@ async function startDrive() {
     // Stays in km/h internally to match summary.topSpeedKmh from TripTracker.stop(), which
     // this gets merged with in presentSummary() — converted to mph only at render time there.
     state.liveTopSpeedKmh = Math.max(state.liveTopSpeedKmh, liveStats.speedKmh || 0);
+    state.currentSpeedKmh = liveStats.speedKmh || 0;
   });
   state.tripTracker.onError((reason) => {
     if (state.gpsFixAcquired) return; // already getting fixes — a stray error isn't worth interrupting the UI for
@@ -525,10 +635,16 @@ async function setupLensSwitcher(currentStream) {
   applyTileCountForLens(currentDeviceId);
 }
 
+// Ultra-wide phone lenses are typically ~100-120° horizontal FOV vs ~65-70° for the main lens —
+// this feeds the tracker's pixel-width-to-distance estimate, which is FOV-dependent.
+const ULTRA_WIDE_HFOV_DEG = 102;
+const MAIN_LENS_HFOV_DEG = 68;
+
 function applyTileCountForLens(deviceId) {
   const lens = state.lensByDeviceId?.get(deviceId);
   const isUltraWide = lens?.order === 0;
   state.carTracker?.setTileCount(isUltraWide ? 2 : 1);
+  state.carTracker?.setHorizontalFovDeg(isUltraWide ? ULTRA_WIDE_HFOV_DEG : MAIN_LENS_HFOV_DEG);
 }
 
 async function switchLens(deviceId) {
@@ -578,7 +694,8 @@ function startDetectionLoop() {
     detectionInFlight = true;
     try {
       const detections = await state.carTracker.detectVehicles(video);
-      const { tracks, events } = state.carTracker.update(detections, video.videoWidth, video.videoHeight);
+      const ourSpeedMps = state.currentSpeedKmh / 3.6;
+      const { tracks, events } = state.carTracker.update(detections, video.videoWidth, video.videoHeight, ourSpeedMps);
       state.latestTracks = tracks;
 
       for (const event of events) {
@@ -592,17 +709,28 @@ function startDetectionLoop() {
   }, DETECTION_INTERVAL_MS);
 }
 
+// Estimated from an assumed vehicle width + camera FOV, not a calibrated measurement — sanity-
+// bound before ever showing it, so a noisy track can't surface an absurd "1200 mph" toast.
+function estimatedSpeedLabel(theirSpeedMps) {
+  if (typeof theirSpeedMps !== 'number') return null;
+  const mph = mpsToMph(theirSpeedMps);
+  if (!(mph >= 0 && mph <= 150)) return null;
+  return `~${Math.round(mph)} mph`;
+}
+
 function handleOvertakeEvent(event) {
+  const speedLabel = estimatedSpeedLabel(event.theirSpeedMps);
+  state.driveEvents.push({ type: event.type, timestamp: event.timestamp });
   if (event.type === 'overtook') {
     state.overtakesByMe += 1;
     els.countOvertook.textContent = String(state.overtakesByMe);
     pulsePill(els.countOvertookPill);
-    showToast('overtook');
+    showToast('overtook', speedLabel);
   } else if (event.type === 'overtaken') {
     state.overtakesOfMe += 1;
     els.countOvertaken.textContent = String(state.overtakesOfMe);
     pulsePill(els.countOvertakenPill);
-    showToast('overtaken');
+    showToast('overtaken', speedLabel);
   }
 }
 
@@ -770,6 +898,27 @@ function netScoreMessage(net) {
   return `Net ${net}. Rough one — the highway had other plans. 🫠`;
 }
 
+// Correlates each in-drive event (which only has a timestamp) to the nearest-in-time GPS
+// route point, so it can later be pinned on the trip's route replay. O(events x route length),
+// trivial even for a long drive's route (a few thousand comparisons at most).
+function correlateEventsToRoute(events, route) {
+  if (!route || route.length === 0) {
+    return events.map((e) => ({ type: e.type, t: e.timestamp, lat: null, lng: null }));
+  }
+  return events.map((e) => {
+    let nearest = route[0];
+    let bestDiff = Math.abs(route[0].t - e.timestamp);
+    for (const point of route) {
+      const diff = Math.abs(point.t - e.timestamp);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        nearest = point;
+      }
+    }
+    return { type: e.type, t: e.timestamp, lat: nearest.lat, lng: nearest.lng };
+  });
+}
+
 function presentSummary(summary, peakG) {
   const net = state.overtakesByMe - state.overtakesOfMe;
 
@@ -786,6 +935,8 @@ function presentSummary(summary, peakG) {
     // "we never measured this" are different things, and trip cards/history should be able
     // to tell them apart rather than showing a misleadingly precise zero.
     peakG: typeof peakG === 'number' ? peakG : null,
+    route: summary.route || [],
+    events: correlateEventsToRoute(state.driveEvents, summary.route),
   };
 
   els.summaryDistance.innerHTML = `${round1(kmToMi(summary.distanceKm))}<span class="stat-unit">mi</span>`;
@@ -858,6 +1009,10 @@ function init() {
 
   els.summarySaveBtn.addEventListener('click', () => {
     saveSummaryAndReturn();
+  });
+
+  els.tripDetailBackBtn.addEventListener('click', () => {
+    showView('dashboard');
   });
 }
 

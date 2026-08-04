@@ -192,6 +192,30 @@
     </div>
   </section>
 
+  <!-- ==================== Trip detail / route replay ==================== -->
+  <main id="view-trip-detail" class="view hidden">
+    <header class="detail-header">
+      <button id="trip-detail-back-btn" class="btn-icon" type="button" aria-label="Back">←</button>
+      <div class="titles">
+        <h1 id="trip-detail-date">Trip</h1>
+        <p>Route &amp; pass replay</p>
+      </div>
+    </header>
+
+    <div class="route-map-wrap">
+      <canvas id="route-canvas"></canvas>
+    </div>
+
+    <div class="route-legend">
+      <span><span class="dot start"></span>Start</span>
+      <span><span class="dot end"></span>End</span>
+      <span><span class="dot overtook"></span>Overtook</span>
+      <span><span class="dot overtaken"></span>Overtaken</span>
+    </div>
+
+    <div class="stats-row" id="trip-detail-stats"></div>
+  </main>
+
   <!-- ==================== Summary modal ==================== -->
   <div id="summary-modal" class="hidden">
     <div class="summary-sheet">
