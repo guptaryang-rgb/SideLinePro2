@@ -24,6 +24,50 @@ const DEFAULT_OPTS = {
 // are almost certainly the same vehicle seen twice, not two vehicles.
 const TILE_DEDUPE_IOU = 0.4;
 
+// Assumed real-world vehicle widths (meters), used only to turn a bounding box's pixel width
+// into a rough estimated distance via a pinhole-camera projection. There's no per-device
+// camera calibration here, so treat every distance/speed number this produces as a ballpark
+// estimate, not a measurement — it's precise enough to meaningfully improve the pass/no-pass
+// classification and give a fun approximate "their speed" readout, not to certify anything.
+const VEHICLE_WIDTH_M = {
+  car: 1.8,
+  truck: 2.5,
+  bus: 2.55,
+  motorcycle: 0.8,
+};
+
+// Typical horizontal field of view for a phone's main rear camera; overridden via
+// setHorizontalFovDeg() when the active lens changes (the ultra-wide lens sees a much wider
+// angle, which changes how a given pixel width maps to a real-world distance).
+const DEFAULT_HFOV_DEG = 68;
+
+function estimateDistanceMeters(bboxWidthPx, frameWidthPx, realWidthM, hFovDeg) {
+  const hFovRad = (hFovDeg * Math.PI) / 180;
+  const focalPx = frameWidthPx / (2 * Math.tan(hFovRad / 2));
+  return (realWidthM * focalPx) / Math.max(1, bboxWidthPx);
+}
+
+// Ordinary least-squares slope of ys against xs — used to turn a track's noisy per-frame
+// distance samples into one robust closing/receding rate (meters/second) instead of just
+// comparing a couple of endpoint samples, which is far more sensitive to a single noisy frame.
+function linearRegressionSlope(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return 0;
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += xs[i];
+    sumY += ys[i];
+    sumXY += xs[i] * ys[i];
+    sumXX += xs[i] * xs[i];
+  }
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return 0;
+  return (n * sumXY - sumX * sumY) / denom;
+}
+
 const bboxIou = (a, b) => {
   const [ax, ay, aw, ah] = a;
   const [bx, by, bw, bh] = b;
@@ -59,6 +103,13 @@ export class CarTracker {
     this.tileCount = 1;
     this._tileCanvas = null;
     this._tileCtx = null;
+    this.horizontalFovDeg = DEFAULT_HFOV_DEG;
+  }
+
+  // Called whenever the active camera lens changes — the ultra-wide lens has a much wider
+  // field of view, which changes what real-world distance a given bbox pixel-width implies.
+  setHorizontalFovDeg(deg) {
+    this.horizontalFovDeg = deg;
   }
 
   async load() {
@@ -132,7 +183,7 @@ export class CarTracker {
     return kept;
   }
 
-  update(detections, frameWidth, frameHeight) {
+  update(detections, frameWidth, frameHeight, ourSpeedMps) {
     const liveTracks = Array.from(this.tracks.values());
     const matchedTrackIds = new Set();
     const matchedDetectionIdxs = new Set();
@@ -177,10 +228,12 @@ export class CarTracker {
       const [x, y, w] = det.bbox;
       track.bbox = det.bbox;
       track.class = det.class;
+      const realWidthM = VEHICLE_WIDTH_M[det.class] || VEHICLE_WIDTH_M.car;
       track.history.push({
         t: Date.now(),
         w: w / frameWidth,
         cx: (x + w / 2) / frameWidth,
+        distM: estimateDistanceMeters(w, frameWidth, realWidthM, this.horizontalFovDeg),
       });
       if (track.history.length > 90) {
         track.history.splice(0, track.history.length - 90);
@@ -193,6 +246,7 @@ export class CarTracker {
       if (matchedDetectionIdxs.has(detIdx)) return;
       const [x, y, w] = det.bbox;
       const id = this.nextId++;
+      const realWidthM = VEHICLE_WIDTH_M[det.class] || VEHICLE_WIDTH_M.car;
       this.tracks.set(id, {
         id,
         bbox: det.bbox,
@@ -204,6 +258,7 @@ export class CarTracker {
             t: Date.now(),
             w: w / frameWidth,
             cx: (x + w / 2) / frameWidth,
+            distM: estimateDistanceMeters(w, frameWidth, realWidthM, this.horizontalFovDeg),
           },
         ],
       });
@@ -214,7 +269,7 @@ export class CarTracker {
       if (matchedTrackIds.has(track.id)) continue;
       track.missedFrames += 1;
       if (track.missedFrames > this.opts.maxMissedFrames) {
-        const event = this._classifyTrack(track);
+        const event = this._classifyTrack(track, ourSpeedMps);
         if (event) events.push(event);
         this.tracks.delete(track.id);
       }
@@ -226,33 +281,24 @@ export class CarTracker {
     };
   }
 
-  // Bbox width is a cheap proxy for how close a vehicle is: growing width means we're
-  // closing on it (or it on us). Whether it drifts toward center or an edge as it's lost
-  // tells us who did the passing: a car that was alongside us mid-pass drifts off-center
-  // as it falls behind (we overtook it); a car that was already close/off-center and
-  // shrinks back toward the middle was pulling away ahead of us (it overtook us).
-  _classifyTrack(track) {
+  // Fits a straight line through the track's estimated-distance-over-time samples to get one
+  // robust closing/receding rate (meters/sec) instead of comparing a couple of endpoint
+  // samples, which one noisy frame can throw off. Negative slope = we were closing the gap
+  // overall; positive = it was pulling away overall. Combined with whether the track drifted
+  // toward or away from dead-center, that tells us who did the passing — and the slope's
+  // magnitude, combined with our own GPS speed, gives a rough estimate of the other vehicle's
+  // absolute speed at the time.
+  _classifyTrack(track, ourSpeedMps) {
     const h = track.history;
     if (h.length < this.opts.minTrackAgeFrames) return null;
 
-    let peakW = -Infinity;
-    let peakIndex = 0;
-    h.forEach((sample, i) => {
-      if (sample.w > peakW) {
-        peakW = sample.w;
-        peakIndex = i;
-      }
-    });
+    const peakW = Math.max(...h.map((s) => s.w));
+    if (peakW < this.opts.closeWidthRatio) return null;
 
     const first3 = h.slice(0, 3);
     const last3 = h.slice(-3);
-    const startW = avg(first3.map((s) => s.w));
-    const endW = avg(last3.map((s) => s.w));
     const startCx = avg(first3.map((s) => s.cx));
     const endCx = avg(last3.map((s) => s.cx));
-
-    if (peakW < this.opts.closeWidthRatio) return null;
-
     const startOffset = Math.abs(startCx - 0.5);
     const endOffset = Math.abs(endCx - 0.5);
 
@@ -262,20 +308,33 @@ export class CarTracker {
     // presence before considering it a candidate at all.
     if (Math.max(startOffset, endOffset) < this.opts.minLateralOffset) return null;
 
-    if (
-      endW - startW > 0 &&
-      peakIndex >= h.length / 2 &&
-      endOffset > startOffset
-    ) {
-      return { type: 'overtook', id: track.id, timestamp: Date.now() };
+    const t0 = h[0].t;
+    const timesSec = h.map((s) => (s.t - t0) / 1000);
+    const distances = h.map((s) => s.distM);
+    const closingRateMps = -linearRegressionSlope(timesSec, distances);
+
+    const hasOurSpeed = typeof ourSpeedMps === 'number' && isFinite(ourSpeedMps) && ourSpeedMps > 0;
+
+    if (closingRateMps > 0 && endOffset > startOffset) {
+      // We were closing the gap overall, and it ended up more off-center than it started —
+      // consistent with catching up to and passing it.
+      return {
+        type: 'overtook',
+        id: track.id,
+        timestamp: Date.now(),
+        theirSpeedMps: hasOurSpeed ? Math.max(0, ourSpeedMps - closingRateMps) : null,
+      };
     }
 
-    if (
-      peakIndex < h.length / 2 &&
-      startW - endW > 0 &&
-      startOffset > endOffset
-    ) {
-      return { type: 'overtaken', id: track.id, timestamp: Date.now() };
+    if (closingRateMps < 0 && startOffset > endOffset) {
+      // The gap was growing overall (it was pulling away), and it started more off-center than
+      // it ended — consistent with having been alongside/behind and then pulling ahead of us.
+      return {
+        type: 'overtaken',
+        id: track.id,
+        timestamp: Date.now(),
+        theirSpeedMps: hasOurSpeed ? ourSpeedMps + Math.abs(closingRateMps) : null,
+      };
     }
 
     return null;
