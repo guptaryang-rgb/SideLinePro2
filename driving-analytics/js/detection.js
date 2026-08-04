@@ -141,6 +141,10 @@ export class CarTracker {
   // successful detections than a fixed matching tolerance allows, fragmenting one real track
   // into several short ones that each get dropped before a pass event can even fire. This is
   // what "struggled to maintain tracking at 0.5x" actually was. Widen the tolerance to match.
+  // Trade-off: the nearest-centroid fallback below is greedy, not a global optimum, so a wider
+  // radius also raises the odds of latching onto a different nearby vehicle in dense traffic
+  // (an identity swap) — an inherent cost of this fix, not a bug, but worth knowing about if
+  // 0.5x tracking still misbehaves after this.
   setMatchDistanceRatio(ratio) {
     this.opts.matchDistanceRatio = ratio;
   }
