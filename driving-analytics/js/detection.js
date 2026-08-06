@@ -228,9 +228,14 @@ export class CarTracker {
   }
 
   // Fits a trailing window of a track's own (cx, cy) history to get its recent on-screen drift
-  // rate (frame-fractions/second) — see _predictCenterPx for how this is used.
+  // rate (frame-fractions/second) — see _predictCenterPx for how this is used. Prefers samples
+  // NOT captured during a bump's grace window, same reasoning as _classifyTrack's regression
+  // filtering: a sample matched via the widened bump-window radius could be the wrong vehicle,
+  // and letting that feed the fitted rate would compound the error into every subsequent tick's
+  // prediction. Falls back to the raw trailing window if too few clean samples remain.
   _updateTrackVelocity(track) {
-    const window = track.history.slice(-VELOCITY_WINDOW_SAMPLES);
+    const clean = track.history.filter((s) => !s.duringBump);
+    const window = (clean.length >= 2 ? clean : track.history).slice(-VELOCITY_WINDOW_SAMPLES);
     if (window.length < 2) {
       track.vcx = 0;
       track.vcy = 0;
@@ -480,15 +485,15 @@ export class CarTracker {
   // magnitude, combined with our own GPS speed, gives a rough estimate of the other vehicle's
   // absolute speed at the time.
   _classifyTrack(track, ourSpeedMps) {
-    // Exclude samples captured during a bump's grace window from the classification inputs —
-    // they can be blur-corrupted or matched via the widened bump-window radius, either of which
-    // could skew the closing-rate regression right when the car is mid-pass. Fall back to the
-    // unfiltered history if too few clean samples remain (a track that spent most of its life
-    // inside a bump window still needs to be classified, just with noisier inputs).
-    const clean = track.history.filter((s) => !s.duringBump);
-    const h = clean.length >= this.opts.minTrackAgeFrames ? clean : track.history;
+    const h = track.history;
     if (h.length < this.opts.minTrackAgeFrames) return null;
 
+    // A bump landing near a track's closest approach — the exact scenario this feature exists to
+    // handle — is squarely within its widest, most off-center samples. Excluding bump-window
+    // samples from these geometry reads (rather than just the regression below) would strip the
+    // very peak-width/boundary evidence a genuine pass needs, silently dropping it. These read
+    // real detected bbox geometry directly and aren't sensitive to the regression's failure mode
+    // (a corrupted sample skewing a fitted slope), so they use the full, unfiltered history.
     const peakW = Math.max(...h.map((s) => s.w));
     if (peakW < this.opts.closeWidthRatio) return null;
 
@@ -505,9 +510,15 @@ export class CarTracker {
     // presence before considering it a candidate at all.
     if (Math.max(startOffset, endOffset) < this.opts.minLateralOffset) return null;
 
-    const t0 = h[0].t;
-    const timesSec = h.map((s) => (s.t - t0) / 1000);
-    const distances = h.map((s) => s.distM);
+    // Unlike the geometry checks above, the regression's fitted slope IS sensitive to a single
+    // corrupted sample (blur-affected, or matched via the widened bump-window radius and
+    // possibly the wrong vehicle) — exclude bump-window samples here specifically, falling back
+    // to the unfiltered history if too few clean samples remain for a robust fit.
+    const cleanForRegression = h.filter((s) => !s.duringBump);
+    const regressionSamples = cleanForRegression.length >= this.opts.minTrackAgeFrames ? cleanForRegression : h;
+    const t0 = regressionSamples[0].t;
+    const timesSec = regressionSamples.map((s) => (s.t - t0) / 1000);
+    const distances = regressionSamples.map((s) => s.distM);
     const closingRateMps = -linearRegressionSlope(timesSec, distances);
 
     const hasOurSpeed = typeof ourSpeedMps === 'number' && isFinite(ourSpeedMps) && ourSpeedMps > 0;

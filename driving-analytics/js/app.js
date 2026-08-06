@@ -867,12 +867,15 @@ function startDrawLoop() {
         );
       }
 
-      const liveTrackIds = new Set(state.latestTracks.map((t) => t.id));
-      for (const id of state.renderBboxByTrackId.keys()) {
-        if (!liveTrackIds.has(id)) state.renderBboxByTrackId.delete(id);
-      }
-
       ctx.shadowBlur = 0;
+    }
+
+    // Outside the block above (not gated on state.latestTracks.length) so this still runs — and
+    // correctly purges everything — on a frame where every previously-tracked vehicle has just
+    // disappeared, not only on frames where at least one track remains live.
+    const liveTrackIds = new Set(state.latestTracks.map((t) => t.id));
+    for (const id of state.renderBboxByTrackId.keys()) {
+      if (!liveTrackIds.has(id)) state.renderBboxByTrackId.delete(id);
     }
 
     state.rafId = requestAnimationFrame(draw);
