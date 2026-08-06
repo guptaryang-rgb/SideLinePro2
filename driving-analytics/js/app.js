@@ -14,6 +14,9 @@ const SPEED_GAUGE_MAX_MPH = 120;
 // How many g's map to the meter dot sitting right at the ring's edge.
 const G_METER_MAX_G = 0.8;
 const G_METER_RADIUS_PX = 34;
+// How fast the on-screen HUD box eases toward each new detection tick's real bbox (0-1, higher
+// = snappier/less smoothing). Purely cosmetic — see startDrawLoop.
+const RENDER_SMOOTHING_ALPHA = 0.35;
 
 // TripTracker/TripHistory work entirely in km & km/h internally (Haversine distance is
 // naturally metric) — conversion to the displayed unit happens only here, at render time.
@@ -116,6 +119,7 @@ const state = {
   routeMap: null,
   routeMapLayerGroup: null,
   currentTripDetail: null,
+  renderBboxByTrackId: new Map(),
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -441,6 +445,7 @@ async function startDrive() {
   state.overtakesByMe = 0;
   state.overtakesOfMe = 0;
   state.latestTracks = [];
+  state.renderBboxByTrackId.clear();
   state.liveTopSpeedKmh = 0;
   state.driveEvents = [];
   els.countOvertook.textContent = '0';
@@ -546,7 +551,13 @@ async function startDrive() {
   motionPermissionPromise.then((granted) => {
     if (!granted) return; // denied, unsupported, or this browser has no permission concept and just works — either way nothing to show if it's not granted
     state.motionTracker = new MotionTracker();
-    state.motionTracker.onUpdate((motionStats) => updateGMeter(motionStats));
+    state.motionTracker.onUpdate((motionStats) => {
+      updateGMeter(motionStats);
+      // Feeds the live G-force reading to CarTracker so it can recognize a road bump as it
+      // happens and temporarily relax track matching/survival — reuses this already-granted
+      // devicemotion subscription, no new permission prompt or listener.
+      state.carTracker?.reportMotionSample(motionStats.currentG);
+    });
     state.motionTracker.start();
     els.gMeter.classList.remove('hidden');
   });
@@ -640,6 +651,15 @@ const MAIN_LENS_HFOV_DEG = 68;
 // to compensate, or a fast-moving car can outrun it and fragment into several lost tracks.
 const ULTRA_WIDE_MATCH_DISTANCE_RATIO = 0.28;
 const MAIN_LENS_MATCH_DISTANCE_RATIO = 0.15;
+// Ultra-wide's foreshortened FOV means a real vehicle is represented by fewer pixels than the
+// same vehicle on the main lens, which systematically suppresses the model's confidence on it —
+// a flat threshold tuned for the main lens under-detects genuine ultra-wide traffic. The
+// MAIN_LENS values below intentionally match DEFAULT_OPTS in detection.js exactly, so switching
+// to the main lens is always a zero-behavior-change no-op.
+const ULTRA_WIDE_SCORE_THRESHOLD = 0.32;
+const MAIN_LENS_SCORE_THRESHOLD = 0.4;
+const ULTRA_WIDE_CLOSE_WIDTH_RATIO = 0.075;
+const MAIN_LENS_CLOSE_WIDTH_RATIO = 0.1;
 
 function applyTileCountForLens(deviceId) {
   const lens = state.lensByDeviceId?.get(deviceId);
@@ -647,6 +667,8 @@ function applyTileCountForLens(deviceId) {
   state.carTracker?.setTileCount(isUltraWide ? 2 : 1);
   state.carTracker?.setHorizontalFovDeg(isUltraWide ? ULTRA_WIDE_HFOV_DEG : MAIN_LENS_HFOV_DEG);
   state.carTracker?.setMatchDistanceRatio(isUltraWide ? ULTRA_WIDE_MATCH_DISTANCE_RATIO : MAIN_LENS_MATCH_DISTANCE_RATIO);
+  state.carTracker?.setScoreThreshold(isUltraWide ? ULTRA_WIDE_SCORE_THRESHOLD : MAIN_LENS_SCORE_THRESHOLD);
+  state.carTracker?.setCloseWidthRatio(isUltraWide ? ULTRA_WIDE_CLOSE_WIDTH_RATIO : MAIN_LENS_CLOSE_WIDTH_RATIO);
 }
 
 async function switchLens(deviceId) {
@@ -820,14 +842,34 @@ function startDrawLoop() {
 
       for (const track of state.latestTracks) {
         const [x, y, w, h] = track.bbox;
+        // The underlying detected bbox only updates once per ~200ms detection tick and carries
+        // real per-tick model noise, which read as a "glitchy" snapping/jittering box on screen
+        // at 60fps. Ease the RENDERED box toward each new detection instead of snapping to it —
+        // this is purely cosmetic (track.bbox itself, and everything derived from it for
+        // tracking/classification, is untouched) and self-corrects within a couple of frames.
+        const prev = state.renderBboxByTrackId.get(track.id);
+        const smoothed = prev
+          ? {
+              x: prev.x + (x - prev.x) * RENDER_SMOOTHING_ALPHA,
+              y: prev.y + (y - prev.y) * RENDER_SMOOTHING_ALPHA,
+              w: prev.w + (w - prev.w) * RENDER_SMOOTHING_ALPHA,
+              h: prev.h + (h - prev.h) * RENDER_SMOOTHING_ALPHA,
+            }
+          : { x, y, w, h };
+        state.renderBboxByTrackId.set(track.id, smoothed);
         drawHudBox(
           ctx,
-          x * scale + offsetX,
-          y * scale + offsetY,
-          w * scale,
-          h * scale,
+          smoothed.x * scale + offsetX,
+          smoothed.y * scale + offsetY,
+          smoothed.w * scale,
+          smoothed.h * scale,
           track.class
         );
+      }
+
+      const liveTrackIds = new Set(state.latestTracks.map((t) => t.id));
+      for (const id of state.renderBboxByTrackId.keys()) {
+        if (!liveTrackIds.has(id)) state.renderBboxByTrackId.delete(id);
       }
 
       ctx.shadowBlur = 0;

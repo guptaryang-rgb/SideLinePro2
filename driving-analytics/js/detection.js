@@ -30,6 +30,44 @@ const TILE_DEDUPE_IOU = 0.4;
 // along the road. Real traffic overtakes involve an actually-moving vehicle.
 const STATIONARY_SPEED_MPS = 2.5; // ~5.6 mph
 
+// A road bump (pothole, speed bump, rough pavement) jolts the phone hard enough to both blur
+// the video for a tick or two AND shift the camera's own framing — a track's normal matching
+// tolerance is sized for how far the VEHICLE moves, not for a jolt like this, so a bump was
+// fragmenting tracks mid-pass (lost entirely, or split into a duplicate). reportMotionSample()
+// (fed from the live G-force meter this app already has permission for) detects a bump as a
+// spike ABOVE a slow rolling baseline, not an absolute g threshold — so ordinary cornering or
+// braking g-loads, which raise the baseline itself, don't trigger it.
+const BUMP_BASELINE_ALPHA = 0.95;
+const BUMP_TRIGGER_DELTA_G = 0.35;
+const BUMP_ABSOLUTE_MIN_G = 0.45;
+// How long (ms) a detected bump keeps matching more forgiving, linearly decaying back to normal
+// — a graded window, not an on/off flag, so a track doesn't die at tick N but would have
+// survived at tick N+1 for no principled reason. Sized generously above the blur/missed-frame
+// window itself (not just the jolt's own duration): the boosted radius is needed most at the
+// moment detection RESUMES after a multi-tick blur gap, which can itself eat up a second or more
+// of this window before reacquisition is even attempted.
+const BUMP_GRACE_MS = 2200;
+const BUMP_EXTRA_MISSED_FRAMES = 6;
+const BUMP_MATCH_RATIO_BOOST = 1.3;
+// Sanity gate on the widened bump-window matching radius: a genuinely re-matched car shouldn't
+// have visually changed size this much in one tick even mid-bump — guards against the wider
+// radius latching onto a different, nearby vehicle instead of the one that got lost.
+const BUMP_WIDTH_RATIO_MIN = 0.4;
+const BUMP_WIDTH_RATIO_MAX = 2.5;
+
+// How many recent history samples feed each track's own on-screen drift-rate estimate — used to
+// predict roughly where it should be next instead of assuming it's still exactly where it was
+// last seen. See _updateTrackVelocity/_predictCenterPx.
+const VELOCITY_WINDOW_SAMPLES = 5;
+// Cap on how far past a track's last real detection to extrapolate its predicted position,
+// deliberately kept below the ~2s give-up horizon (maxMissedFrames * the ~200ms detection tick)
+// so prediction never speculates further ahead than the track is about to be abandoned anyway.
+const MAX_EXTRAPOLATION_SEC = 1.5;
+// Clamp on the fitted drift rate (frame-fractions/second) so one noisy/blurred sample inside the
+// fit window can't fling a prediction wildly off — a bad fit then just degrades to "no match
+// found" rather than confidently pointing at the wrong place.
+const MAX_NORM_CENTER_VELOCITY = 1.5;
+
 // Assumed real-world vehicle widths (meters), used only to turn a bounding box's pixel width
 // into a rough estimated distance via a pinhole-camera projection. There's no per-device
 // camera calibration here, so treat every distance/speed number this produces as a ballpark
@@ -99,6 +137,8 @@ const centerDistance = (a, b) => {
 
 const avg = (nums) => nums.reduce((sum, n) => sum + n, 0) / nums.length;
 
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
 export class CarTracker {
   constructor(opts = {}) {
     this.opts = { ...DEFAULT_OPTS, ...opts };
@@ -110,6 +150,9 @@ export class CarTracker {
     this._tileCanvas = null;
     this._tileCtx = null;
     this.horizontalFovDeg = DEFAULT_HFOV_DEG;
+    // Bump/shake detection state — see reportMotionSample()/_bumpFactor().
+    this._gBaseline = null;
+    this._lastBumpAt = -Infinity;
   }
 
   // Called whenever the active camera lens changes — the ultra-wide lens has a much wider
@@ -147,6 +190,78 @@ export class CarTracker {
   // 0.5x tracking still misbehaves after this.
   setMatchDistanceRatio(ratio) {
     this.opts.matchDistanceRatio = ratio;
+  }
+
+  // Ultra-wide's foreshortened field of view means a genuine vehicle is represented by fewer
+  // pixels than the same vehicle on the main lens, which systematically suppresses the model's
+  // confidence on it — a flat score/close-width threshold tuned for the main lens under-detects
+  // real ultra-wide traffic. Let app.js relax both per-lens.
+  setScoreThreshold(v) {
+    this.opts.scoreThreshold = v;
+  }
+
+  setCloseWidthRatio(v) {
+    this.opts.closeWidthRatio = v;
+  }
+
+  // Feeds this tracker a live accelerometer reading (in g's) so it can recognize a road bump as
+  // it happens and temporarily relax track matching/survival to compensate — see the BUMP_*
+  // constants above for why. Call this from MotionTracker's onUpdate callback; safe to never
+  // call at all (e.g. motion permission denied) — bumpFactor then just always stays 0, identical
+  // to pre-bump-handling behavior.
+  reportMotionSample(currentG) {
+    if (typeof currentG !== 'number' || !isFinite(currentG)) return;
+    this._gBaseline = this._gBaseline == null
+      ? currentG
+      : BUMP_BASELINE_ALPHA * this._gBaseline + (1 - BUMP_BASELINE_ALPHA) * currentG;
+    if (currentG - this._gBaseline > BUMP_TRIGGER_DELTA_G && currentG > BUMP_ABSOLUTE_MIN_G) {
+      this._lastBumpAt = Date.now();
+    }
+  }
+
+  // Graded 1 -> 0 decay over BUMP_GRACE_MS since the last detected bump, rather than a binary
+  // flag, so nothing keyed off it has an arbitrary cliff-edge.
+  _bumpFactor(nowMs) {
+    const elapsed = nowMs - this._lastBumpAt;
+    if (elapsed < 0 || elapsed > BUMP_GRACE_MS) return 0;
+    return 1 - elapsed / BUMP_GRACE_MS;
+  }
+
+  // Fits a trailing window of a track's own (cx, cy) history to get its recent on-screen drift
+  // rate (frame-fractions/second) — see _predictCenterPx for how this is used.
+  _updateTrackVelocity(track) {
+    const window = track.history.slice(-VELOCITY_WINDOW_SAMPLES);
+    if (window.length < 2) {
+      track.vcx = 0;
+      track.vcy = 0;
+      return;
+    }
+    const t0 = window[0].t;
+    const ts = window.map((s) => (s.t - t0) / 1000);
+    track.vcx = clamp(
+      linearRegressionSlope(ts, window.map((s) => s.cx)),
+      -MAX_NORM_CENTER_VELOCITY,
+      MAX_NORM_CENTER_VELOCITY
+    );
+    track.vcy = clamp(
+      linearRegressionSlope(ts, window.map((s) => s.cy)),
+      -MAX_NORM_CENTER_VELOCITY,
+      MAX_NORM_CENTER_VELOCITY
+    );
+  }
+
+  // Extrapolates where a track's center is LIKELY to be right now, given how it's been drifting,
+  // rather than assuming it's still exactly where it was last actually seen. dtSec is real
+  // elapsed wall-clock time since the last real detection, so it naturally scales to however
+  // long a blur/shake gap lasted and however many ticks it spanned — including the longer,
+  // less-regular gaps tiled ultra-wide detection already introduces — with no lens-specific
+  // branching needed here.
+  _predictCenterPx(track, nowMs, frameWidth, frameHeight) {
+    const last = track.history[track.history.length - 1];
+    const dtSec = clamp((nowMs - last.t) / 1000, 0, MAX_EXTRAPOLATION_SEC);
+    const predCx = last.cx + (track.vcx || 0) * dtSec;
+    const predCy = last.cy + (track.vcy || 0) * dtSec;
+    return [predCx * frameWidth, predCy * frameHeight];
   }
 
   async detectVehicles(videoEl) {
@@ -216,14 +331,34 @@ export class CarTracker {
   }
 
   update(detections, frameWidth, frameHeight, ourSpeedMps) {
+    const now = Date.now();
+    const bumpFactor = this._bumpFactor(now);
+    // Multiplies (rather than replaces) the already lens-tuned matchDistanceRatio, so this
+    // composes with the existing main/ultra-wide split instead of overriding it.
+    const effectiveMatchDistanceRatio = this.opts.matchDistanceRatio * (1 + BUMP_MATCH_RATIO_BOOST * bumpFactor);
+
     const liveTracks = Array.from(this.tracks.values());
+    // Each live track's predicted current center, extrapolated from its own recent drift rate —
+    // matched against instead of the track's static last-known position (see _predictCenterPx).
+    // Only the fallback (non-IOU) pass below uses this; a real frame-to-frame overlap is already
+    // reliable evidence on its own and is left alone to avoid regressing normal-condition
+    // matching.
+    const predictedBboxes = new Map(
+      liveTracks.map((t) => {
+        const [px, py] = this._predictCenterPx(t, now, frameWidth, frameHeight);
+        const [, , tw, th] = t.bbox;
+        return [t.id, [px - tw / 2, py - th / 2, tw, th]];
+      })
+    );
+
     const matchedTrackIds = new Set();
     const matchedDetectionIdxs = new Set();
     const pairs = [];
 
     // Greedily pair every detection with the highest-IOU live track, falling back to
-    // nearest-center distance (bounded by matchDistanceRatio) when boxes don't overlap
-    // at all, e.g. a fast-moving vehicle sampled at a low frame rate.
+    // nearest-predicted-center distance (bounded by effectiveMatchDistanceRatio) when boxes
+    // don't overlap at all, e.g. a fast-moving vehicle sampled at a low frame rate, or one
+    // reacquired after a bump-induced gap.
     detections.forEach((det, detIdx) => {
       let bestTrack = null;
       let bestIou = 0;
@@ -239,14 +374,24 @@ export class CarTracker {
         let bestDist = Infinity;
         for (const track of liveTracks) {
           if (matchedTrackIds.has(track.id)) continue;
-          const dist = centerDistance(det.bbox, track.bbox);
+          const dist = centerDistance(det.bbox, predictedBboxes.get(track.id));
           if (dist < bestDist) {
             bestDist = dist;
             bestTrack = track;
           }
         }
-        if (!bestTrack || bestDist > this.opts.matchDistanceRatio * frameWidth) {
+        if (!bestTrack || bestDist > effectiveMatchDistanceRatio * frameWidth) {
           bestTrack = null;
+        }
+        // The bump-widened radius makes the greedy matcher more likely to grab a different,
+        // nearby vehicle instead of the one that actually got lost — reject a fallback match
+        // whose apparent size implausibly jumped as a sanity check specifically during that
+        // widened window.
+        if (bestTrack && bumpFactor > 0) {
+          const widthRatio = det.bbox[2] / Math.max(1, bestTrack.bbox[2]);
+          if (widthRatio < BUMP_WIDTH_RATIO_MIN || widthRatio > BUMP_WIDTH_RATIO_MAX) {
+            bestTrack = null;
+          }
         }
       }
       if (bestTrack) {
@@ -257,26 +402,32 @@ export class CarTracker {
     });
 
     for (const { track, det } of pairs) {
-      const [x, y, w] = det.bbox;
+      const [x, y, w, h] = det.bbox;
       track.bbox = det.bbox;
       track.class = det.class;
       const realWidthM = VEHICLE_WIDTH_M[det.class] || VEHICLE_WIDTH_M.car;
       track.history.push({
-        t: Date.now(),
+        t: now,
         w: w / frameWidth,
         cx: (x + w / 2) / frameWidth,
+        cy: (y + h / 2) / frameHeight,
         distM: estimateDistanceMeters(w, frameWidth, realWidthM, this.horizontalFovDeg),
+        // Flags samples captured while a bump's effects were still active, so _classifyTrack can
+        // exclude them from the pass/no-pass regression — a blur-corrupted or bump-widened-match
+        // sample shouldn't get to skew the closing-rate slope that decides a real pass.
+        duringBump: bumpFactor > 0.3,
       });
       if (track.history.length > 90) {
         track.history.splice(0, track.history.length - 90);
       }
+      this._updateTrackVelocity(track);
       track.missedFrames = 0;
       track.age += 1;
     }
 
     detections.forEach((det, detIdx) => {
       if (matchedDetectionIdxs.has(detIdx)) return;
-      const [x, y, w] = det.bbox;
+      const [x, y, w, h] = det.bbox;
       const id = this.nextId++;
       const realWidthM = VEHICLE_WIDTH_M[det.class] || VEHICLE_WIDTH_M.car;
       this.tracks.set(id, {
@@ -285,12 +436,16 @@ export class CarTracker {
         class: det.class,
         age: 1,
         missedFrames: 0,
+        vcx: 0,
+        vcy: 0,
         history: [
           {
-            t: Date.now(),
+            t: now,
             w: w / frameWidth,
             cx: (x + w / 2) / frameWidth,
+            cy: (y + h / 2) / frameHeight,
             distM: estimateDistanceMeters(w, frameWidth, realWidthM, this.horizontalFovDeg),
+            duringBump: bumpFactor > 0.3,
           },
         ],
       });
@@ -300,7 +455,11 @@ export class CarTracker {
     for (const track of liveTracks) {
       if (matchedTrackIds.has(track.id)) continue;
       track.missedFrames += 1;
-      if (track.missedFrames > this.opts.maxMissedFrames) {
+      // A bump grants extra survival ticks on top of the normal ceiling, decaying back to it as
+      // bumpFactor decays to 0 — without this, even a perfectly-predicted rematch is useless if
+      // the track was already deleted before detection resumed.
+      const missedFramesCeiling = this.opts.maxMissedFrames + Math.round(BUMP_EXTRA_MISSED_FRAMES * bumpFactor);
+      if (track.missedFrames > missedFramesCeiling) {
         const event = this._classifyTrack(track, ourSpeedMps);
         if (event) events.push(event);
         this.tracks.delete(track.id);
@@ -321,7 +480,13 @@ export class CarTracker {
   // magnitude, combined with our own GPS speed, gives a rough estimate of the other vehicle's
   // absolute speed at the time.
   _classifyTrack(track, ourSpeedMps) {
-    const h = track.history;
+    // Exclude samples captured during a bump's grace window from the classification inputs —
+    // they can be blur-corrupted or matched via the widened bump-window radius, either of which
+    // could skew the closing-rate regression right when the car is mid-pass. Fall back to the
+    // unfiltered history if too few clean samples remain (a track that spent most of its life
+    // inside a bump window still needs to be classified, just with noisier inputs).
+    const clean = track.history.filter((s) => !s.duringBump);
+    const h = clean.length >= this.opts.minTrackAgeFrames ? clean : track.history;
     if (h.length < this.opts.minTrackAgeFrames) return null;
 
     const peakW = Math.max(...h.map((s) => s.w));
@@ -383,5 +548,7 @@ export class CarTracker {
   reset() {
     this.tracks.clear();
     this.nextId = 1;
+    this._gBaseline = null;
+    this._lastBumpAt = -Infinity;
   }
 }
