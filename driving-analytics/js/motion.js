@@ -6,6 +6,9 @@
 
 const GRAVITY_MS2 = 9.80665;
 const GRAVITY_LOW_PASS_ALPHA = 0.9;
+// devicemotion can fire as often as ~60Hz — far more resolution than a report chart needs and
+// more data than is worth keeping in memory for a long drive, so the time series is throttled.
+const SERIES_SAMPLE_INTERVAL_MS = 500;
 
 export class MotionTracker {
   constructor() {
@@ -16,6 +19,8 @@ export class MotionTracker {
     this.peakAx = 0;
     this.peakAy = 0;
     this._gravityEstimate = null;
+    this.series = []; // throttled {t, g} samples across the drive, for a post-drive G graph
+    this._lastSeriesSampleAt = 0;
   }
 
   static isSupported() {
@@ -42,6 +47,8 @@ export class MotionTracker {
     this.peakAx = 0;
     this.peakAy = 0;
     this._gravityEstimate = null;
+    this.series = [];
+    this._lastSeriesSampleAt = 0;
     this._listener = (event) => this._onMotion(event);
     window.addEventListener('devicemotion', this._listener);
   }
@@ -51,7 +58,7 @@ export class MotionTracker {
       window.removeEventListener('devicemotion', this._listener);
       this._listener = null;
     }
-    return { peakG: this.peakG };
+    return { peakG: this.peakG, series: this.series };
   }
 
   onUpdate(callback) {
@@ -90,6 +97,13 @@ export class MotionTracker {
 
     const magnitudeG = Math.sqrt(ax * ax + ay * ay + az * az) / GRAVITY_MS2;
     this.currentG = magnitudeG;
+
+    const now = Date.now();
+    if (now - this._lastSeriesSampleAt >= SERIES_SAMPLE_INTERVAL_MS) {
+      this._lastSeriesSampleAt = now;
+      this.series.push({ t: now, g: magnitudeG });
+    }
+
     if (magnitudeG > this.peakG) {
       this.peakG = magnitudeG;
       // Track the horizontal (x/y) position of the peak reading too, purely for the meter's
