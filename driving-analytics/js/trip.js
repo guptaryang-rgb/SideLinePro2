@@ -176,6 +176,10 @@ export class TripTracker {
         // contribution, but still update lastSample & route below.
       }
 
+      // Real per-point telemetry (not reconstructed after the fact) — this is what makes a
+      // speed-over-time graph in an exported report possible.
+      point.speedKmh = this._lastInstantSpeedKmh;
+
       this.lastSample = point;
     }
 

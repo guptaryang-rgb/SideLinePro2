@@ -4,6 +4,7 @@
 import { CarTracker } from './detection.js';
 import { TripTracker, TripHistory } from './trip.js';
 import { MotionTracker } from './motion.js';
+import { generateTripReport } from './report.js';
 
 const ONBOARDING_KEY = 'overtaker_onboarded';
 const DETECTION_INTERVAL_MS = 200;
@@ -35,6 +36,8 @@ const els = {
   tripDetailDate: document.getElementById('trip-detail-date'),
   tripDetailStats: document.getElementById('trip-detail-stats'),
   routeMapContainer: document.getElementById('route-map'),
+  exportPdfBtn: document.getElementById('export-pdf-btn'),
+  exportPdfStatus: document.getElementById('export-pdf-status'),
   startDriveBtn: document.getElementById('start-drive-btn'),
   statTotalTrips: document.getElementById('stat-total-trips'),
   statTotalDistance: document.getElementById('stat-total-distance'),
@@ -112,6 +115,7 @@ const state = {
   driveEvents: [],
   routeMap: null,
   routeMapLayerGroup: null,
+  currentTripDetail: null,
 };
 
 const GPS_ERROR_MESSAGES = {
@@ -304,6 +308,8 @@ function buildTripCard(trip) {
 
 function showTripDetail(trip) {
   showView('trip-detail');
+  state.currentTripDetail = trip;
+  els.exportPdfStatus.classList.add('hidden');
   els.tripDetailDate.textContent = formatDate(trip.startedAt);
 
   els.tripDetailStats.innerHTML = `
@@ -716,7 +722,11 @@ function estimatedSpeedLabel(theirSpeedMps) {
 
 function handleOvertakeEvent(event) {
   const speedLabel = estimatedSpeedLabel(event.theirSpeedMps);
-  state.driveEvents.push({ type: event.type, timestamp: event.timestamp });
+  state.driveEvents.push({
+    type: event.type,
+    timestamp: event.timestamp,
+    theirSpeedMps: typeof event.theirSpeedMps === 'number' ? event.theirSpeedMps : null,
+  });
   if (event.type === 'overtook') {
     state.overtakesByMe += 1;
     els.countOvertook.textContent = String(state.overtakesByMe);
@@ -864,8 +874,11 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   state.lensByDeviceId = null;
 
   let peakG = null;
+  let gSeries = [];
   if (state.motionTracker) {
-    peakG = state.motionTracker.stop().peakG;
+    const motionResult = state.motionTracker.stop();
+    peakG = motionResult.peakG;
+    gSeries = motionResult.series;
     state.motionTracker = null;
   }
   resetGMeter();
@@ -882,7 +895,7 @@ function stopDrive({ showSummary } = { showSummary: true }) {
   }
 
   if (showSummary && summary) {
-    presentSummary(summary, peakG);
+    presentSummary(summary, peakG, gSeries);
   }
 }
 
@@ -899,7 +912,7 @@ function netScoreMessage(net) {
 // trivial even for a long drive's route (a few thousand comparisons at most).
 function correlateEventsToRoute(events, route) {
   if (!route || route.length === 0) {
-    return events.map((e) => ({ type: e.type, t: e.timestamp, lat: null, lng: null }));
+    return events.map((e) => ({ type: e.type, t: e.timestamp, lat: null, lng: null, theirSpeedMps: e.theirSpeedMps }));
   }
   return events.map((e) => {
     let nearest = route[0];
@@ -911,11 +924,11 @@ function correlateEventsToRoute(events, route) {
         nearest = point;
       }
     }
-    return { type: e.type, t: e.timestamp, lat: nearest.lat, lng: nearest.lng };
+    return { type: e.type, t: e.timestamp, lat: nearest.lat, lng: nearest.lng, theirSpeedMps: e.theirSpeedMps };
   });
 }
 
-function presentSummary(summary, peakG) {
+function presentSummary(summary, peakG, gSeries) {
   const net = state.overtakesByMe - state.overtakesOfMe;
 
   state.lastSummary = {
@@ -931,6 +944,7 @@ function presentSummary(summary, peakG) {
     // "we never measured this" are different things, and trip cards/history should be able
     // to tell them apart rather than showing a misleadingly precise zero.
     peakG: typeof peakG === 'number' ? peakG : null,
+    gSeries: gSeries || [],
     route: summary.route || [],
     events: correlateEventsToRoute(state.driveEvents, summary.route),
   };
@@ -1009,6 +1023,20 @@ function init() {
 
   els.tripDetailBackBtn.addEventListener('click', () => {
     showView('dashboard');
+  });
+
+  els.exportPdfBtn.addEventListener('click', () => {
+    if (!state.currentTripDetail) return;
+    els.exportPdfStatus.classList.remove('hidden', 'error');
+    els.exportPdfStatus.textContent = 'Generating PDF…';
+    try {
+      generateTripReport(state.currentTripDetail);
+      els.exportPdfStatus.textContent = 'Downloaded — check your files.';
+    } catch (err) {
+      console.error('PDF export failed', err);
+      els.exportPdfStatus.classList.add('error');
+      els.exportPdfStatus.textContent = err && err.message ? err.message : 'PDF export failed.';
+    }
   });
 }
 
