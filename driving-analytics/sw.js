@@ -7,7 +7,7 @@
 // network-first fetch strategy below means an app-shell update reaches users on their very
 // next load even if this version bump is ever forgotten.
 
-const CACHE_NAME = 'overtaker-v4';
+const CACHE_NAME = 'overtaker-v5';
 
 const APP_SHELL = [
   '/',
